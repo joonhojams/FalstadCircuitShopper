@@ -119,11 +119,100 @@ export function parse(text) {
   return { parts, unknown };
 }
 
+// ---------------------------------------------------------------------------
+// Newer XML-style export:
+//   <cir f="1" ts="0.000005" ...>
+//     <r x="288 528 288 592" f="0" r="100000"/>
+//     <c x="656 512 656 592" f="0" c="1e-7" .../>
+//   </cir>
+// The tag is the element type, x is "x1 y1 x2 y2", f is flags, and the other
+// attributes are the element's values. Parsed with regexes (no DOM needed).
+// Tags I have not seen real attributes for are listed as "Unknown" with their
+// attributes in Details, so nothing is dropped or silently mis-valued.
+// ---------------------------------------------------------------------------
+
+const first = (a, keys) => {
+  for (const k of keys) if (isNum(a[k])) return Number(a[k]);
+  return null;
+};
+const attrSummary = (a) =>
+  Object.entries(a).filter(([k]) => k !== "x" && k !== "f").map(([k, v]) => `${k}=${v}`).join(" ").slice(0, 80);
+// value formatted with units, or (if the expected attribute is missing) the raw attributes as details
+const unitOrAttrs = (v, unit, a) => (v === null ? ["", attrSummary(a)] : [eng(v, unit), ""]);
+const xmlSource = (_f, a) =>
+  source(0, [first(a, ["wf"]) ?? 0, first(a, ["fr", "freq"]) ?? 0, first(a, ["maxv"]) ?? 0, first(a, ["bi", "bias"]) ?? 0]);
+
+const XML_COMPONENTS = {
+  r:     ["Resistor",       (_f, a) => unitOrAttrs(first(a, ["r"]), "Ω", a)],
+  pt:    ["Potentiometer",  (_f, a) => {
+    const [v, d] = unitOrAttrs(first(a, ["ma"]), "Ω", a);
+    return [v, v && a.sl ? `Slider: ${a.sl}` : d];
+  }],
+  c:     ["Capacitor",      (_f, a) => unitOrAttrs(first(a, ["c"]), "F", a)],
+  l:     ["Inductor",       (_f, a) => unitOrAttrs(first(a, ["l", "ind"]), "H", a)],
+  i:     ["Current Source", (_f, a) => unitOrAttrs(first(a, ["cu", "i"]), "A", a)],
+  d:     ["Diode",          (_f, a) => [a.mo ?? "", a.mo ? "" : attrSummary(a)]],
+  z:     ["Zener Diode",    (_f, a) => {
+    const [v, d] = unitOrAttrs(first(a, ["zv", "vz"]), "V", a);
+    return [v, v ? "Zener" : d];
+  }],
+  v:     ["Voltage Source", xmlSource],
+  R:     ["Voltage Rail",   xmlSource],
+  t:     ["BJT Transistor", (_f, a) => [Number(a.pn) === -1 ? "PNP" : "NPN", a.mo && a.mo !== "default" ? a.mo : ""]],
+  j:     ["JFET",           (_f, a) => [a.mo ?? "", ""]],
+  a:     ["Op-Amp",         () => ["", ""]],
+  s:     ["Switch (SPST)",  (_f, a) => ["", a.mm === "true" ? "Momentary" : ""]],
+  S:     ["Switch (SPDT)",  () => ["", ""]],
+  Timer: ["555 Timer",      () => ["", ""]],
+};
+
+// Wires, ground, text, boxes, outputs, scopes (and their <p> children), meters.
+const XML_IGNORED = new Set(["w", "g", "x", "b", "O", "o", "p", "h", "OhmMeter", "Probe"]);
+
+const XML_ENTITIES = { "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'" };
+const unescapeXml = (s) => s.replace(/&(?:amp|lt|gt|quot|apos);/g, (m) => XML_ENTITIES[m]);
+
+export const isXmlExport = (text) => /^\s*(?:<\?xml[^>]*>\s*)?<cir[\s>]/.test(text);
+
+export function parseXml(text) {
+  const parts = [];
+  const unknown = {};
+  const tagRe = /<([A-Za-z][\w:-]*)((?:\s+[\w:-]+="[^"]*")*)\s*\/?>/g;
+  const attrRe = /([\w:-]+)="([^"]*)"/g;
+  for (const m of text.matchAll(tagRe)) {
+    const code = m[1];
+    if (XML_IGNORED.has(code)) continue;
+    const a = {};
+    for (const am of m[2].matchAll(attrRe)) a[am[1]] = unescapeXml(am[2]);
+    if (a.x === undefined) continue; // root <cir>, or anything without coordinates
+    const coords = a.x.trim().split(/\s+/).slice(0, 4).map(Number);
+    if (coords.length < 4 || coords.some(Number.isNaN)) continue;
+    const [x1, y1, x2, y2] = coords.map((n) => Math.trunc(n));
+    const fl = a.f ?? "0";
+    const flags = /^x[0-9a-f]+$/i.test(fl) ? parseInt(fl.slice(1), 16) : (parseInt(fl, 10) || 0);
+
+    let name, value, details;
+    if (Object.hasOwn(XML_COMPONENTS, code)) {
+      const [n, fn] = XML_COMPONENTS[code];
+      name = n;
+      [value, details] = fn(flags, a);
+    } else {
+      name = `Unknown (type ${code})`;
+      value = "";
+      details = attrSummary(a);
+      unknown[code] = (unknown[code] ?? 0) + 1;
+    }
+    parts.push({ code, name, value, details, x1, y1, x2, y2 });
+  }
+  return { parts, unknown };
+}
+
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
-/** Parse an export and return { count, summary, parts, unknown }. */
+/** Parse an export (classic line format or newer XML format) and return { count, summary, parts, unknown }. */
 export function bom(raw) {
-  const { parts, unknown } = parse(loadText(raw));
+  const text = loadText(raw);
+  const { parts, unknown } = isXmlExport(text) ? parseXml(text) : parse(text);
 
   const counters = {};
   const detail = parts.map((p) => {

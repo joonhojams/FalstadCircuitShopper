@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { bom, eng } from "../src/parser.js";
 
 export const SAMPLE = `$ 1 0.000005 10.20027730826997 50 5 50 5e-11
@@ -51,5 +52,37 @@ assert.deepEqual(u.unknown, { zzz: 1 });
 
 // Garbage in -> nothing found
 assert.equal(bom("hello world").count, 0);
+
+// Newer XML-style export (a real circuit: triggered A/R envelope)
+{
+  const xml = readFileSync(new URL("./fixtures/triggered_ar_envelope_compact.txt", import.meta.url), "utf8");
+  const x = bom(xml);
+  assert.equal(x.count, 33);
+  assert.deepEqual(x.unknown, {});
+  const row = (component, value) => x.summary.find((s) => s.component === component && s.value === value);
+  assert.equal(row("Resistor", "1 kΩ").quantity, 3);
+  assert.equal(row("Resistor", "10 kΩ").quantity, 4);
+  assert.equal(row("Resistor", "100 kΩ").quantity, 4);
+  assert.equal(row("Resistor", "47 kΩ").quantity, 1);
+  assert.equal(row("Capacitor", "100 nF").quantity, 1);
+  assert.equal(row("Capacitor", "1 µF").quantity, 1);
+  assert.equal(row("Capacitor", "1 nF").quantity, 1);
+  assert.equal(row("Diode", "1N4148").quantity, 3);
+  assert.equal(x.summary.find((s) => s.component === "Op-Amp").quantity, 3);
+  assert.equal(x.summary.find((s) => s.component === "Voltage Rail").quantity, 5);
+  assert.equal(x.summary.find((s) => s.component === "555 Timer").quantity, 1);
+  assert.equal(row("Potentiometer", "1 MΩ").details, "Slider: RELEASE");
+  assert.equal(x.summary.find((s) => s.component === "Switch (SPST)").details, "Momentary");
+  // wires, ground, text, scopes and the ohmmeter are not parts
+  assert.ok(!x.parts.some((p) => ["w", "g", "x", "o", "O", "b", "OhmMeter"].includes(p.type)));
+}
+
+// XML: unrecognized tags are reported with their attributes, not dropped
+{
+  const u = bom('<cir f="1">\n  <r x="0 0 10 0" f="0" r="220"/>\n  <Widget x="0 0 10 0" f="0" k="v" n="3"/>\n</cir>');
+  assert.equal(u.count, 2);
+  assert.deepEqual(u.unknown, { Widget: 1 });
+  assert.equal(u.parts[1].details, "k=v n=3");
+}
 
 console.log("parser tests passed");

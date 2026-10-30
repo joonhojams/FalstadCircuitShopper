@@ -94,10 +94,11 @@ Accounts from different providers are not merged automatically, even if the emai
 npm test
 ```
 
-Runs the parser tests and API tests (Node 22+). The API tests call the Worker directly against an in-memory SQLite database standing in for D1, with Google's endpoints mocked. They cover anonymous use, validation, history and per-user isolation, session expiry, logout, and the full sign-in flow. They don't start `wrangler dev` or a browser, so do a quick manual check of the page after your first local run.
+Runs the parser tests (both export formats) and API tests (Node 22+). The API tests call the Worker directly against an in-memory SQLite database standing in for D1, with Google's endpoints mocked. They cover anonymous use, validation, history and per-user isolation, session expiry, logout, and the full sign-in flow. They don't start `wrangler dev` or a browser, so do a quick manual check of the page after your first local run.
 
 ## Limitations
 
-- The parser maps the common element types (see `COMPONENTS` in `src/parser.js`). Others are listed as `Unknown (type N)` rather than dropped. To add one, add an entry there, and a prefix in `REF_PREFIX` if you want a specific reference designator.
+- Two export formats are supported and detected automatically: the classic line format (`r 176 80 304 80 0 1000`) and the newer XML-style format (`<r x="176 80 304 80" f="0" r="1000"/>`). The XML mapping was checked against one real circuit (`test/fixtures/`). Element types it doesn't recognize are listed as `Unknown (type name)` with their raw attributes in Details, rather than dropped. If you hit one, send me a sample, or add an entry to `XML_COMPONENTS` (XML) or `COMPONENTS` (classic) in `src/parser.js`, plus a prefix in `REF_PREFIX` if you want a specific reference designator.
+- Some XML elements (voltage source `v`, inductor `l`, current source `i`, Zener `z`) are mapped from the classic format's names and haven't been checked against a real XML sample. If an attribute name differs, their raw attributes show up in Details instead of a value.
 - Share links that store the circuit compressed (`?ctz=...`) aren't supported. Use **File > Export As Text** instead.
 - Values reflect the simulated circuit. Package, tolerance, and part numbers aren't in the export, so they aren't in the BOM.
