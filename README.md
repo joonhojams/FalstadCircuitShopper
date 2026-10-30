@@ -1,85 +1,103 @@
-# CircuitJS BOM Generator
+# CircuitJS BOM (Cloudflare Workers)
 
-A small Python script that reads a [Falstad CircuitJS1](https://www.falstad.com/circuit/) text export and produces a bill of materials (parts list) as CSV or TSV, ready to import into a database or paste into Google Sheets.
+A web app that turns a [Falstad CircuitJS1](https://www.falstad.com/circuit/) text export into a parts list. Paste or upload the export, view a summary or per-part table, and copy it into Google Sheets or download a CSV. Signed-in users (Google) get a saved history of their circuits.
 
-## Requirements
+- **Hosting:** Cloudflare Workers, with static files served by Workers Static Assets
+- **Database:** Cloudflare D1 (SQLite) for users, sessions, and history
+- **Auth:** Google OAuth 2.0, implemented with `fetch` (no auth library)
+- **Dependencies:** none at runtime; `wrangler` for dev/deploy only
 
-- Python 3.6+
-- No third-party packages
+Anonymous use works with no account. Signing in only adds history.
 
-## Getting the input
-
-In CircuitJS, choose **File > Export As Text**, copy the text, and save it to a `.txt` file. A CircuitJS share URL also works as input.
-
-## Usage
+## Project layout
 
 ```
-python circuitjs_bom.py circuit.txt                 # summary BOM -> circuit_bom.csv
-python circuitjs_bom.py circuit.txt --detail        # one row per part -> circuit_parts.csv
-python circuitjs_bom.py circuit.txt --tsv           # tab-separated output
-python circuitjs_bom.py circuit.txt -o parts.csv    # choose the output file
-python circuitjs_bom.py -                           # read stdin, write stdout
+public/index.html     Front end (single file: HTML, CSS, JS)
+src/index.js          Worker entry: routing and the /api/* endpoints
+src/auth.js           Google sign-in, sessions, logout
+src/parser.js         CircuitJS export -> BOM (pure functions)
+schema.sql            D1 tables
+wrangler.jsonc        Worker, static assets, and D1 binding config
+test/                 Parser and API tests
 ```
 
-| Option | Description |
-| --- | --- |
-| `input` | Export file, or `-` for stdin |
-| `-o`, `--output` | Output path (default: `<input>_bom.csv`, or `<input>_parts.csv` with `--detail`) |
-| `--detail` | One row per component instead of a grouped summary |
-| `--tsv` | Tab-separated output instead of CSV |
-
-## Output
-
-**Summary mode** (default) groups identical parts:
+## Run locally
 
 ```
-Component,Value,Details,Quantity
-Capacitor,1 µF,,2
-Resistor,1 kΩ,,2
-Resistor,4.7 kΩ,,1
-Voltage Source,5 V amplitude,"AC (sine), 60 Hz",1
+npm install
+cp .dev.vars.example .dev.vars      # then fill in Google credentials (optional, see below)
+npm run db:init:local
+npm run dev                         # http://localhost:8787
 ```
 
-**Detail mode** lists each part with a reference designator and its position in the simulator:
+Without Google credentials the app still works; the "Sign in" button just doesn't appear.
+
+## Set up Google sign-in
+
+1. In the [Google Cloud Console](https://console.cloud.google.com/), create a project and configure the **OAuth consent screen** (app name, support email).
+2. Go to **Credentials > Create credentials > OAuth client ID > Web application**.
+3. Add these **Authorized redirect URIs**:
+   - `http://localhost:8787/auth/callback` (local dev)
+   - `https://<your-worker>.<your-subdomain>.workers.dev/auth/callback` (production, or your custom domain)
+4. Put the client ID and secret in `.dev.vars` for local use, and set them as secrets for production (below).
+
+The app requests only `openid email profile`. While the consent screen is in "Testing" status, only listed test users can sign in; publish it to allow anyone.
+
+## Deploy
 
 ```
-Ref,Component,Value,Details,Type Code,x1,y1,x2,y2
-R1,Resistor,1 kΩ,,r,176,80,304,80
-C1,Capacitor,1 µF,,c,304,80,304,176
+npx wrangler login
+npx wrangler d1 create circuitjs-bom      # copy the database_id it prints into wrangler.jsonc
+npm run db:init:remote
+npx wrangler secret put GOOGLE_CLIENT_ID
+npx wrangler secret put GOOGLE_CLIENT_SECRET
+npm run deploy
 ```
 
-## Using the output
+Then add the deployed URL's `/auth/callback` to the Google client's redirect URIs.
 
-- **Google Sheets:** run with `--tsv`, copy the file contents, and paste into a sheet. Or use **File > Import** with the CSV.
-- **Database:** import the CSV with your tool's bulk loader (e.g. `.import --csv` in SQLite, `COPY` in PostgreSQL, `LOAD DATA` in MySQL).
+## API
 
-## Supported components
+| Method | Path | Auth | Description |
+| --- | --- | --- | --- |
+| `POST` | `/api/bom` | optional | Body `{ text, title?, save? }`. Returns `{ count, summary, parts, unknown, id, saved }`. Saves to history when signed in (unless `save: false`). |
+| `GET` | `/api/me` | no | `{ user, authConfigured }` |
+| `GET` | `/api/history` | yes | Newest 100 saved circuits (id, title, part count, date) |
+| `GET` | `/api/history/:id` | yes | One saved circuit, with its BOM recomputed from the stored text |
+| `DELETE` | `/api/history/:id` | yes | Delete a saved circuit |
+| `GET` | `/auth/login` | no | Start Google sign-in |
+| `GET` | `/auth/callback` | no | Google redirect target |
+| `POST` | `/auth/logout` | no | End the session |
 
-| Category | Parts |
-| --- | --- |
-| Passives | Resistor, potentiometer, capacitor, inductor, transformer |
-| Diodes | Diode, Zener diode, LED |
-| Sources | Voltage source (DC and waveforms), voltage rail, current source |
-| Transistors | BJT (NPN/PNP), MOSFET (N/P-channel), JFET |
-| ICs | Op-amp |
-| Switches | SPST, SPDT |
-| Logic | Inverter, AND, NAND, OR, NOR, XOR, logic input/output |
+Limits: 500,000 characters per circuit, 200 saved circuits per user (oldest are dropped). Resubmitting the same circuit twice in a row doesn't create a duplicate entry.
 
-Wires, grounds, scopes, labels, and other non-purchasable elements are skipped. Unrecognized element types appear in the output as `Unknown (type N)` and a warning is printed, so nothing is dropped silently.
+## Adding another sign-in provider
 
-Values are formatted with SI prefixes (e.g. `4.7 kΩ`, `1 µF`, `10 mH`).
+Users and logins are separate tables, so a new provider doesn't require a migration:
 
-## Adding components
+1. Add a login/callback route pair in `src/auth.js` modeled on the Google one.
+2. After verifying the provider's response, look up `identities` by `(provider, provider_user_id)`, create a `users` row plus an `identities` row if none exists, then call `createSession()`.
 
-Add an entry to the `COMPONENTS` table in `circuitjs_bom.py`, keyed by the CircuitJS element type code (the first token on each line of the export). Each entry is a name plus a function that returns `(value, details)`:
+Accounts from different providers are not merged automatically, even if the email matches. Linking them safely needs a deliberate "link account" step.
 
-```python
-"r": ("Resistor", lambda flags, params: (eng(num(params, 0), "Ω"), "")),
+## Security notes
+
+- Session tokens are random, stored only as SHA-256 hashes, and sent in `HttpOnly`, `SameSite=Lax` cookies (`Secure` on HTTPS). Sessions last 30 days.
+- OAuth uses a random `state` value checked against a short-lived cookie.
+- Write requests with a cross-origin `Origin` header are rejected.
+- CSV/TSV export prefixes cells that could be read as spreadsheet formulas (for example starting with `=` or `@`), since circuit files can come from other people.
+- Everything the page renders from a circuit file is inserted as text, not HTML.
+
+## Tests
+
+```
+npm test
 ```
 
-To give a new part a reference designator prefix in detail mode, add it to `REF_PREFIX`. Parts without one get `U`.
+Runs the parser tests and API tests (Node 22+). The API tests call the Worker directly against an in-memory SQLite database standing in for D1, with Google's endpoints mocked. They cover anonymous use, validation, history and per-user isolation, session expiry, logout, and the full sign-in flow. They don't start `wrangler dev` or a browser, so do a quick manual check of the page after your first local run.
 
 ## Limitations
 
-- Parts are identified from the export's element codes. Component values come from the circuit as simulated, so real-world details like package, tolerance, or part number are not included.
-- Only the common element types above are mapped so far.
+- The parser maps the common element types (see `COMPONENTS` in `src/parser.js`). Others are listed as `Unknown (type N)` rather than dropped. To add one, add an entry there, and a prefix in `REF_PREFIX` if you want a specific reference designator.
+- Share links that store the circuit compressed (`?ctz=...`) aren't supported. Use **File > Export As Text** instead.
+- Values reflect the simulated circuit. Package, tolerance, and part numbers aren't in the export, so they aren't in the BOM.

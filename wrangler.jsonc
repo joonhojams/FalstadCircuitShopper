@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "circuitjs-bom",
+  "main": "src/index.js",
+  "compatibility_date": "2025-09-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    // Only API/auth paths run the Worker; everything else is served as static files.
+    "run_worker_first": ["/api/*", "/auth/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "circuitjs-bom",
+      // Replace with the id printed by: npx wrangler d1 create circuitjs-bom
+      "database_id": "19b14877-5d7b-47a8-9223-15fd805d8e24"
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+# Copy to .dev.vars for local development (wrangler dev). Never commit .dev.vars.
+# In production, set these with: npx wrangler secret put GOOGLE_CLIENT_ID (and _SECRET)
+GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your-client-secret

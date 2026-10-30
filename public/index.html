@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CircuitJS BOM</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1b1f24; --muted: #667085;
+    --line: #e3e6eb; --accent: #0b6e4f; --accent-text: #ffffff; --danger: #b42318;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101316; --card: #181c20; --text: #e8eaed; --muted: #98a2b3;
+      --line: #2a3037; --accent: #3ecf9e; --accent-text: #08231a; --danger: #f97066;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+           max-width: 1100px; margin: 0 auto; padding: 16px; }
+  header h1 { font-size: 18px; margin: 0; }
+  header h1 span { color: var(--muted); font-weight: 400; }
+  #auth { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+  #auth img { width: 28px; height: 28px; border-radius: 50%; }
+  main { max-width: 1100px; margin: 0 auto; padding: 0 16px 48px;
+         display: grid; grid-template-columns: 1fr; gap: 16px; align-items: start; }
+  main.with-history { grid-template-columns: minmax(0, 1fr) 280px; }
+  @media (max-width: 800px) { main.with-history { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .card + .card { margin-top: 16px; }
+  h2 { font-size: 14px; margin: 0 0 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  textarea { width: 100%; min-height: 180px; resize: vertical; padding: 10px; border-radius: 8px;
+             border: 1px solid var(--line); background: var(--bg); color: var(--text);
+             font: 13px/1.4 var(--mono); }
+  input[type=text] { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
+                     background: var(--bg); color: var(--text); font: inherit; min-width: 0; flex: 1; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+  button, .btn { font: inherit; padding: 7px 14px; border-radius: 8px; cursor: pointer;
+                 border: 1px solid var(--line); background: var(--card); color: var(--text);
+                 text-decoration: none; display: inline-block; }
+  button:hover, .btn:hover { border-color: var(--muted); }
+  button.primary, .btn.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: .55; cursor: default; }
+  .spacer { flex: 1; }
+  #status { min-height: 1.4em; margin-top: 8px; font-size: 14px; color: var(--muted); }
+  #status.error { color: var(--danger); }
+  .tabs { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .tabs button { border: 0; border-radius: 0; background: transparent; }
+  .tabs button[aria-pressed=true] { background: var(--accent); color: var(--accent-text); }
+  .table-wrap { overflow-x: auto; margin-top: 12px; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .warn { margin-top: 10px; font-size: 13px; color: var(--muted); }
+  #history ul { list-style: none; margin: 0; padding: 0; }
+  #history li { display: flex; align-items: stretch; gap: 4px; margin-bottom: 6px; }
+  #history li .open { flex: 1; text-align: left; min-width: 0; }
+  #history li .open strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #history li .open small { color: var(--muted); }
+  #history li .del { padding: 0 10px; color: var(--muted); }
+  #history li .del:hover { color: var(--danger); }
+  #history li.active .open { border-color: var(--accent); }
+  .hint { color: var(--muted); font-size: 14px; margin: 0; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>CircuitJS BOM <span>· parts list from a Falstad export</span></h1>
+  <div id="auth"></div>
+</header>
+
+<main id="layout">
+  <section>
+    <div class="card">
+      <h2>Circuit</h2>
+      <textarea id="input" spellcheck="false"
+        placeholder="In CircuitJS choose File → Export As Text, then paste the text here (or upload the .txt file)."></textarea>
+      <div class="row">
+        <input type="text" id="title" placeholder="Name this circuit (optional)" maxlength="120" hidden>
+        <input type="file" id="file" accept=".txt,text/plain" hidden>
+        <button id="pick">Upload .txt</button>
+        <button id="example">Load example</button>
+        <span class="spacer"></span>
+        <button id="go" class="primary">Generate BOM</button>
+      </div>
+      <div id="status" role="status"></div>
+    </div>
+
+    <div class="card" id="results" hidden>
+      <div class="row" style="margin-top:0">
+        <h2 id="result-title" style="margin:0">Parts list</h2>
+        <span class="spacer"></span>
+        <div class="tabs" role="group" aria-label="View">
+          <button id="tab-summary" aria-pressed="true">Summary</button>
+          <button id="tab-detail" aria-pressed="false">Per part</button>
+        </div>
+      </div>
+      <div class="table-wrap"><table id="table"></table></div>
+      <div class="warn" id="unknown" hidden></div>
+      <div class="row">
+        <button id="copy">Copy for Google Sheets</button>
+        <button id="download">Download CSV</button>
+      </div>
+    </div>
+  </section>
+
+  <aside id="history" class="card" hidden>
+    <h2>History</h2>
+    <ul id="history-list"></ul>
+    <p class="hint" id="history-empty" hidden>Your generated BOMs will show up here.</p>
+  </aside>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const el = (tag, props = {}, ...kids) => {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === "class") n.className = v;
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else if (v !== undefined && v !== null && v !== false) n.setAttribute(k, v === true ? "" : v);
+  }
+  n.append(...kids);
+  return n;
+};
+
+const EXAMPLE = `$ 1 0.000005 10.20027730826997 50 5 50 5e-11
+v 176 176 176 80 0 1 60 5 0 0 0.5
+r 176 80 304 80 0 1000
+r 304 80 432 80 0 1000
+r 432 80 432 176 0 4700
+c 304 80 304 176 0 0.000001 0 0.001
+c 432 176 304 176 0 0.000001 0 0.001
+l 432 80 560 80 0 0.01 0
+d 560 80 560 176 2 default
+162 560 176 432 176 2 2.1024259 0
+t 304 240 368 240 0 1 0 0 100
+f 368 304 432 304 1 1.5 5.6 1
+a 464 304 560 304 0 15 -15 1000000 0 0
+w 176 176 304 176 0
+g 176 176 176 208 0 0
+`;
+
+const COLUMNS = {
+  summary: [
+    { key: "component", label: "Component" }, { key: "value", label: "Value" },
+    { key: "details", label: "Details" }, { key: "quantity", label: "Quantity", num: true },
+  ],
+  detail: [
+    { key: "ref", label: "Ref" }, { key: "component", label: "Component" },
+    { key: "value", label: "Value" }, { key: "details", label: "Details" },
+    { key: "type", label: "Type Code" }, { key: "x1", label: "x1", num: true },
+    { key: "y1", label: "y1", num: true }, { key: "x2", label: "x2", num: true },
+    { key: "y2", label: "y2", num: true },
+  ],
+};
+
+let me = { user: null, authConfigured: false };
+let current = null;      // last BOM result
+let currentId = null;    // history id of the shown result, if saved
+let mode = "summary";
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    credentials: "same-origin",
+    ...opts,
+    headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
+  });
+  let data = null;
+  try { data = await res.json(); } catch {}
+  if (!res.ok) throw new Error((data && data.error) || `Request failed (${res.status})`);
+  return data;
+}
+
+function setStatus(msg, isError = false) {
+  const s = $("#status");
+  s.textContent = msg || "";
+  s.className = isError ? "error" : "";
+}
+
+// ---------- auth ----------
+function renderAuth() {
+  const box = $("#auth");
+  box.replaceChildren();
+  if (me.user) {
+    if (me.user.picture) box.append(el("img", { src: me.user.picture, alt: "", referrerpolicy: "no-referrer" }));
+    box.append(el("span", {}, me.user.name || me.user.email || "Signed in"),
+      el("button", { onclick: signOut }, "Sign out"));
+  } else if (me.authConfigured) {
+    box.append(el("a", { class: "btn", href: "/auth/login" }, "Sign in with Google"));
+  }
+  $("#title").hidden = !me.user;
+  $("#history").hidden = !me.user;
+  $("#layout").classList.toggle("with-history", Boolean(me.user));
+}
+
+async function signOut() {
+  await api("/auth/logout", { method: "POST" });
+  me.user = null; currentId = null;
+  renderAuth();
+}
+
+// ---------- history ----------
+async function loadHistory() {
+  if (!me.user) return;
+  const { items } = await api("/api/history");
+  const list = $("#history-list");
+  list.replaceChildren(...items.map((it) =>
+    el("li", { class: it.id === currentId ? "active" : "" },
+      el("button", { class: "open", onclick: () => openHistory(it.id) },
+        el("strong", {}, it.title),
+        el("small", {}, `${it.part_count} parts · ${new Date(it.created_at).toLocaleString()}`)),
+      el("button", { class: "del", title: "Delete", "aria-label": `Delete ${it.title}`,
+                     onclick: () => deleteHistory(it.id) }, "×"))));
+  $("#history-empty").hidden = items.length > 0;
+}
+
+async function openHistory(id) {
+  try {
+    setStatus("Loading…");
+    const data = await api(`/api/history/${id}`);
+    $("#input").value = data.text;
+    $("#title").value = data.title;
+    showResult(data, data.id, data.title);
+    setStatus("");
+    loadHistory();
+  } catch (e) { setStatus(e.message, true); }
+}
+
+async function deleteHistory(id) {
+  if (!confirm("Delete this saved circuit?")) return;
+  try {
+    await api(`/api/history/${id}`, { method: "DELETE" });
+    if (currentId === id) currentId = null;
+    loadHistory();
+  } catch (e) { setStatus(e.message, true); }
+}
+
+// ---------- results ----------
+function showResult(result, id = null, title = "") {
+  current = result; currentId = id;
+  $("#results").hidden = false;
+  $("#result-title").textContent = title ? `Parts list · ${title}` : "Parts list";
+  const unk = Object.entries(result.unknown || {});
+  const w = $("#unknown");
+  w.hidden = unk.length === 0;
+  w.textContent = unk.length
+    ? "Unrecognized element types (listed as “Unknown”): " + unk.map(([k, v]) => `${k} ×${v}`).join(", ")
+    : "";
+  renderTable();
+}
+
+function renderTable() {
+  const cols = COLUMNS[mode];
+  const rows = mode === "summary" ? current.summary : current.parts;
+  $("#table").replaceChildren(
+    el("thead", {}, el("tr", {}, ...cols.map((c) => el("th", { class: c.num ? "num" : "" }, c.label)))),
+    el("tbody", {}, ...rows.map((r) =>
+      el("tr", {}, ...cols.map((c) => el("td", { class: c.num ? "num" : "" }, String(r[c.key] ?? "")))))));
+  $("#tab-summary").setAttribute("aria-pressed", mode === "summary");
+  $("#tab-detail").setAttribute("aria-pressed", mode === "detail");
+}
+
+// ---------- export ----------
+// Neutralise spreadsheet formula injection from untrusted circuit files.
+const safe = (v) => {
+  const s = String(v ?? "");
+  return /^[=@]|^[+-](?![\d.])|^[\t\r]/.test(s) ? "'" + s : s;
+};
+function toDelimited(delim) {
+  const cols = COLUMNS[mode];
+  const rows = mode === "summary" ? current.summary : current.parts;
+  const cell = (v) => {
+    const s = safe(v);
+    if (delim === "\t") return s.replace(/[\t\r\n]+/g, " ");
+    return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  return [cols.map((c) => c.label), ...rows.map((r) => cols.map((c) => r[c.key]))]
+    .map((row) => row.map(cell).join(delim)).join("\n");
+}
+
+$("#copy").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(toDelimited("\t"));
+    setStatus("Copied. Paste into a Google Sheets cell to fill the table.");
+  } catch { setStatus("Couldn't access the clipboard. Use Download CSV instead.", true); }
+});
+
+$("#download").addEventListener("click", () => {
+  // BOM prefix so Excel reads µ and Ω as UTF-8.
+  const blob = new Blob(["﻿" + toDelimited(",")], { type: "text/csv;charset=utf-8" });
+  const a = el("a", { href: URL.createObjectURL(blob),
+                      download: mode === "summary" ? "circuit_bom.csv" : "circuit_parts.csv" });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+
+$("#tab-summary").addEventListener("click", () => { mode = "summary"; if (current) renderTable(); });
+$("#tab-detail").addEventListener("click", () => { mode = "detail"; if (current) renderTable(); });
+
+// ---------- input ----------
+async function generate() {
+  const text = $("#input").value;
+  if (!text.trim()) { setStatus("Paste a CircuitJS export first.", true); return; }
+  const go = $("#go");
+  go.disabled = true; setStatus("Working…");
+  try {
+    const title = $("#title").value.trim();
+    const data = await api("/api/bom", { method: "POST", body: JSON.stringify({ text, title }) });
+    showResult(data, data.id, title);
+    setStatus(data.saved ? `Found ${data.count} parts. Saved to your history.` : `Found ${data.count} parts.`);
+    loadHistory();
+  } catch (e) { setStatus(e.message, true); }
+  finally { go.disabled = false; }
+}
+
+$("#go").addEventListener("click", generate);
+$("#input").addEventListener("keydown", (e) => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") generate(); });
+$("#example").addEventListener("click", () => { $("#input").value = EXAMPLE; setStatus(""); });
+$("#pick").addEventListener("click", () => $("#file").click());
+$("#file").addEventListener("change", async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  $("#input").value = await f.text();
+  if (!$("#title").value) $("#title").value = f.name.replace(/\.[^.]+$/, "");
+  e.target.value = "";
+  setStatus(`Loaded ${f.name}.`);
+});
+
+// ---------- boot ----------
+(async () => {
+  try { me = await api("/api/me"); } catch {}
+  renderAuth();
+  loadHistory().catch(() => {});
+})();
+</script>
+</body>
+</html>
