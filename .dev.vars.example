@@ -1,4 +1,20 @@
 # Copy to .dev.vars for local development (wrangler dev). Never commit .dev.vars.
-# In production, set these with: npx wrangler secret put GOOGLE_CLIENT_ID (and _SECRET)
+# In production, set these with: npx wrangler secret put GOOGLE_CLIENT_ID (and the others)
 GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-client-secret
+
+# Optional: DigiKey price lookup (see README). Leave out to hide the feature.
+DIGIKEY_CLIENT_ID=your-digikey-client-id
+DIGIKEY_CLIENT_SECRET=your-digikey-client-secret
+# Optional: use DigiKey's sandbox (with sandbox credentials) while testing
+# DIGIKEY_API_BASE=https://sandbox-api.digikey.com
+
+# Optional: DigiKey order history. Also needs the two DIGIKEY_ values above.
+# Encrypts each user's DigiKey tokens before they are stored. Generate with: openssl rand -base64 32
+# Keep a copy somewhere safe: if it is lost or changed, users have to reconnect DigiKey.
+TOKEN_ENCRYPTION_KEY=
+# Only if the app is served from a different address than the one users visit (custom domain, proxy):
+# DIGIKEY_REDIRECT_URI=https://your-domain.example/auth/digikey/callback
+
+# Optional: password hashing cost (default and maximum 100000, the Workers limit). Lower only if sign-in hits CPU limits.
+# PASSWORD_ITERATIONS=100000

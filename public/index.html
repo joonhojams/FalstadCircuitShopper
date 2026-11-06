@@ -35,7 +35,7 @@
   textarea { width: 100%; min-height: 180px; resize: vertical; padding: 10px; border-radius: 8px;
              border: 1px solid var(--line); background: var(--bg); color: var(--text);
              font: 13px/1.4 var(--mono); }
-  input[type=text] { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
+  input[type=text], input[type=email], input[type=password] { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
                      background: var(--bg); color: var(--text); font: inherit; min-width: 0; flex: 1; }
   .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
   button, .btn { font: inherit; padding: 7px 14px; border-radius: 8px; cursor: pointer;
@@ -45,6 +45,18 @@
   button.primary, .btn.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
   button:disabled { opacity: .55; cursor: default; }
   .spacer { flex: 1; }
+  dialog#signin { background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 12px;
+                  padding: 20px; width: min(380px, calc(100vw - 32px)); }
+  dialog#signin::backdrop { background: rgba(0,0,0,.55); }
+  dialog#signin h2 { margin: 0 0 12px; }
+  #signin form { display: grid; gap: 10px; }
+  #signin label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+  #signin input { width: 100%; flex: none; }
+  #signin .or { text-align: center; color: var(--muted); font-size: 13px; margin: 14px 0 10px; }
+  #signin .alt { display: grid; gap: 8px; }
+  #signin .alt .btn { text-align: center; }
+  #signin .linkish { background: none; border: 0; padding: 0; color: var(--muted); text-decoration: underline; font-size: 13px; }
+  #signin-msg { min-height: 1.3em; font-size: 13px; color: var(--danger); }
   #status { min-height: 1.4em; margin-top: 8px; font-size: 14px; color: var(--muted); }
   #status.error { color: var(--danger); }
   .tabs { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
@@ -65,6 +77,29 @@
   #history li .del:hover { color: var(--danger); }
   #history li.active .open { border-color: var(--accent); }
   .hint { color: var(--muted); font-size: 14px; margin: 0; }
+  select, input[type=number], input[type=date] { padding: 7px 10px; border-radius: 8px; border: 1px solid var(--line);
+                               background: var(--bg); color: var(--text); font: inherit; }
+  label { display: inline-flex; align-items: center; gap: 6px; }
+  #pricing-status { min-height: 1.4em; margin-top: 8px; font-size: 14px; color: var(--muted); }
+  #pricing-status.error { color: var(--danger); }
+  td input.q { width: 12rem; padding: 4px 8px; font-size: 13px; }
+  td.best { white-space: normal; min-width: 12rem; }
+  #pricing-foot { margin-top: 12px; }
+  #orders-status { min-height: 1.4em; margin-top: 8px; font-size: 14px; color: var(--muted); }
+  #orders-status.error { color: var(--danger); }
+  tr.sub td { white-space: normal; background: var(--bg); }
+  .so { padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+  .so:last-child { border-bottom: 0; }
+  .so table { margin-top: 8px; font-size: 13px; }
+  td.muted, .muted { color: var(--muted); }
+  td.err { color: var(--danger); white-space: normal; }
+  .tag { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 6px;
+         padding: 0 5px; cursor: help; display: inline-block; margin-top: 4px; }
+  button.link { border: 0; background: none; padding: 0; margin-left: 8px; color: var(--accent);
+                text-decoration: underline; font-size: 13px; }
+  a { color: var(--accent); }
+  tr.alt td { white-space: normal; background: var(--bg); font-size: 13px; }
+  tr.alt ul { margin: 0; padding-left: 18px; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -73,6 +108,26 @@
   <h1>CircuitJS BOM <span>· parts list from a Falstad export</span></h1>
   <div id="auth"></div>
 </header>
+
+<dialog id="signin" aria-labelledby="signin-title">
+  <h2 id="signin-title">Sign in</h2>
+  <form id="signin-form" novalidate>
+    <label id="signin-name-row" hidden>Name (optional)
+      <input id="signin-name" type="text" autocomplete="name" maxlength="80"></label>
+    <label>Email
+      <input id="signin-email" type="email" autocomplete="username" required></label>
+    <label>Password
+      <input id="signin-pass" type="password" autocomplete="current-password" required></label>
+    <div id="signin-msg" role="alert"></div>
+    <button class="primary" id="signin-go" type="submit">Sign in</button>
+    <button class="linkish" id="signin-toggle" type="button">New here? Create an account</button>
+  </form>
+  <div id="signin-alt" hidden>
+    <div class="or">or</div>
+    <div class="alt" id="signin-alt-btns"></div>
+  </div>
+  <div class="row"><span class="spacer"></span><button id="signin-close" type="button">Cancel</button></div>
+</dialog>
 
 <main id="layout">
   <section>
@@ -105,6 +160,69 @@
       <div class="row">
         <button id="copy">Copy for Google Sheets</button>
         <button id="download">Download CSV</button>
+      </div>
+    </div>
+
+    <div class="card" id="pricing" hidden>
+      <h2>Cheapest parts · DigiKey</h2>
+      <p class="hint" id="pricing-msg"></p>
+      <div id="pricing-controls" hidden>
+        <div class="row" style="margin-top:0">
+          <label>Boards <input type="number" id="boards" min="1" max="1000" value="1" style="width:5.5rem"></label>
+          <label>Parts
+            <select id="pkg">
+              <option value="tht">Through-hole</option>
+              <option value="smd">Surface-mount</option>
+              <option value="any">Any</option>
+            </select>
+          </label>
+          <label><input type="checkbox" id="instock" checked> In stock only</label>
+          <span class="spacer"></span>
+          <button id="price-go" class="primary">Find cheapest</button>
+        </div>
+        <div id="pricing-status" role="status"></div>
+        <div class="table-wrap"><table id="pricing-table"></table></div>
+        <div id="pricing-foot" hidden>
+          <p class="hint" id="pricing-total"></p>
+          <div class="row">
+            <button id="pricing-copy">Copy for Google Sheets</button>
+            <button id="pricing-download">Download CSV</button>
+          </div>
+        </div>
+        <p class="warn">DigiKey list prices in USD, for the quantity you need (price breaks and minimum orders included).
+          Searches are guesses from the circuit alone: it has no package, tolerance, voltage rating or part number.
+          Parts tagged “assumed” are generic stand-ins. Edit any search and press Enter to re-check that line. The cheapest option is picked
+          from DigiKey's top matches, so always confirm the part before ordering.</p>
+      </div>
+    </div>
+
+    <div class="card" id="orders" hidden>
+      <div class="row" style="margin-top:0">
+        <h2 style="margin:0">DigiKey orders</h2>
+        <span class="spacer"></span>
+        <button id="orders-disconnect" hidden>Disconnect</button>
+      </div>
+      <p class="hint" id="orders-msg"></p>
+      <div id="orders-connect" hidden>
+        <a class="btn primary" href="/auth/digikey/login">Connect DigiKey account</a>
+      </div>
+      <div id="orders-controls" hidden>
+        <div class="row" style="margin-top:0">
+          <label>From <input type="date" id="o-start"></label>
+          <label>To <input type="date" id="o-end"></label>
+          <label><input type="checkbox" id="o-shared"> Include other users on my DigiKey account</label>
+          <span class="spacer"></span>
+          <button id="o-go" class="primary">Load orders</button>
+        </div>
+        <div id="orders-status" role="status"></div>
+        <div class="table-wrap"><table id="orders-table"></table></div>
+        <div id="orders-foot" class="row" hidden>
+          <button id="o-prev">Previous</button>
+          <span class="hint" id="o-page"></span>
+          <button id="o-next">Next</button>
+          <span class="spacer"></span>
+          <button id="o-download">Download CSV</button>
+        </div>
       </div>
     </div>
   </section>
@@ -160,7 +278,7 @@ const COLUMNS = {
   ],
 };
 
-let me = { user: null, authConfigured: false };
+let me = { user: null, authConfigured: false, methods: { google: false, email: true, digikey: false }, pricing: false, orders: { configured: false, connected: false } };
 let current = null;      // last BOM result
 let currentId = null;    // history id of the shown result, if saved
 let mode = "summary";
@@ -173,7 +291,12 @@ async function api(path, opts = {}) {
   });
   let data = null;
   try { data = await res.json(); } catch {}
-  if (!res.ok) throw new Error((data && data.error) || `Request failed (${res.status})`);
+  if (!res.ok) {
+    const err = new Error((data && data.error) || `Request failed (${res.status})`);
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
   return data;
 }
 
@@ -191,17 +314,71 @@ function renderAuth() {
     if (me.user.picture) box.append(el("img", { src: me.user.picture, alt: "", referrerpolicy: "no-referrer" }));
     box.append(el("span", {}, me.user.name || me.user.email || "Signed in"),
       el("button", { onclick: signOut }, "Sign out"));
-  } else if (me.authConfigured) {
-    box.append(el("a", { class: "btn", href: "/auth/login" }, "Sign in with Google"));
+  } else {
+    box.append(el("button", { class: "primary", onclick: openSignIn }, "Sign in"));
   }
   $("#title").hidden = !me.user;
   $("#history").hidden = !me.user;
   $("#layout").classList.toggle("with-history", Boolean(me.user));
+  updatePricingGate();
+  updateOrdersGate();
 }
+
+// ---------- sign-in dialog (email + password, Google, DigiKey) ----------
+let registering = false;
+
+function setSignInMode(reg) {
+  registering = reg;
+  $("#signin-title").textContent = reg ? "Create an account" : "Sign in";
+  $("#signin-go").textContent = reg ? "Create account" : "Sign in";
+  $("#signin-toggle").textContent = reg ? "Already have an account? Sign in" : "New here? Create an account";
+  $("#signin-name-row").hidden = !reg;
+  $("#signin-pass").autocomplete = reg ? "new-password" : "current-password";
+  $("#signin-msg").textContent = "";
+}
+
+function openSignIn() {
+  const m = me.methods || {};
+  const box = $("#signin-alt-btns");
+  box.replaceChildren();
+  if (m.google) box.append(el("a", { class: "btn", href: "/auth/login" }, "Continue with Google"));
+  if (m.digikey) box.append(el("a", { class: "btn", href: "/auth/digikey/signin" }, "Continue with DigiKey"));
+  $("#signin-alt").hidden = box.children.length === 0;
+  setSignInMode(false);
+  $("#signin").showModal();
+  $("#signin-email").focus();
+}
+
+$("#signin-toggle").addEventListener("click", () => setSignInMode(!registering));
+$("#signin-close").addEventListener("click", () => $("#signin").close());
+$("#signin-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const msg = $("#signin-msg"), go = $("#signin-go");
+  const email = $("#signin-email").value.trim(), password = $("#signin-pass").value;
+  if (!email || !password) { msg.textContent = "Enter your email and password."; return; }
+  go.disabled = true;
+  msg.textContent = "";
+  try {
+    await api(registering ? "/api/auth/register" : "/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email, password, name: $("#signin-name").value.trim() }),
+    });
+    $("#signin-pass").value = "";
+    $("#signin").close();
+    me = await api("/api/me");
+    renderAuth();
+    loadHistory().catch(() => {});
+  } catch (err) {
+    msg.textContent = err.message;
+  } finally {
+    go.disabled = false;
+  }
+});
 
 async function signOut() {
   await api("/auth/logout", { method: "POST" });
   me.user = null; currentId = null;
+  resetOrders();
   renderAuth();
 }
 
@@ -245,6 +422,8 @@ async function deleteHistory(id) {
 function showResult(result, id = null, title = "") {
   current = result; currentId = id;
   $("#results").hidden = false;
+  $("#pricing").hidden = false;
+  resetPricing();
   $("#result-title").textContent = title ? `Parts list · ${title}` : "Parts list";
   const unk = Object.entries(result.unknown || {});
   const w = $("#unknown");
@@ -272,16 +451,18 @@ const safe = (v) => {
   const s = String(v ?? "");
   return /^[=@]|^[+-](?![\d.])|^[\t\r]/.test(s) ? "'" + s : s;
 };
-function toDelimited(delim) {
-  const cols = COLUMNS[mode];
-  const rows = mode === "summary" ? current.summary : current.parts;
+function delimited(delim, headers, rows) {
   const cell = (v) => {
     const s = safe(v);
     if (delim === "\t") return s.replace(/[\t\r\n]+/g, " ");
     return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  return [cols.map((c) => c.label), ...rows.map((r) => cols.map((c) => r[c.key]))]
-    .map((row) => row.map(cell).join(delim)).join("\n");
+  return [headers, ...rows].map((row) => row.map(cell).join(delim)).join("\n");
+}
+function toDelimited(delim) {
+  const cols = COLUMNS[mode];
+  const rows = mode === "summary" ? current.summary : current.parts;
+  return delimited(delim, cols.map((c) => c.label), rows.map((r) => cols.map((c) => r[c.key])));
 }
 
 $("#copy").addEventListener("click", async () => {
@@ -302,6 +483,332 @@ $("#download").addEventListener("click", () => {
 
 $("#tab-summary").addEventListener("click", () => { mode = "summary"; if (current) renderTable(); });
 $("#tab-detail").addEventListener("click", () => { mode = "detail"; if (current) renderTable(); });
+
+// ---------- DigiKey pricing ----------
+let pricing = null;        // one entry per summary row once a lookup has run
+let manualQueries = {};    // searches the user typed, kept across re-lookups
+
+const money = (n) => {
+  if (typeof n !== "number" || Number.isNaN(n)) return "";
+  return "$" + n.toFixed(n < 1 ? 4 : 2).replace(/(\.\d\d)0+$/, "$1");
+};
+const safeUrl = (u) => (typeof u === "string" && /^https:\/\//i.test(u) ? u : null);
+function setPStatus(msg, isError = false) {
+  const s = $("#pricing-status");
+  s.textContent = msg || "";
+  s.className = isError ? "error" : "";
+}
+
+function updatePricingGate() {
+  const ok = Boolean(me.user && me.pricing);
+  $("#pricing-controls").hidden = !ok;
+  const msg = $("#pricing-msg");
+  msg.hidden = ok;
+  msg.textContent = !me.pricing
+    ? "Price lookup isn't set up on this server."
+    : "Sign in to look up DigiKey prices.";
+}
+
+function resetPricing() {
+  pricing = null; manualQueries = {};
+  setPStatus("");
+  renderPricing();
+  updatePricingGate();
+}
+
+const partLink = (o) => {
+  const label = o.mpn || o.dkpn || "part";
+  const href = safeUrl(o.url);
+  return href ? el("a", { href, target: "_blank", rel: "noopener noreferrer" }, label) : el("span", {}, label);
+};
+const partMeta = (o) => [o.dkpn, o.packaging, o.manufacturer].filter(Boolean).join(" · ");
+
+function altRow(options) {
+  return el("tr", { class: "alt", hidden: true },
+    el("td", { colspan: 6 }, el("ul", {}, ...options.map((o) =>
+      el("li", {}, partLink(o), ` · ${partMeta(o)} · ${money(o.unitPrice)} × ${o.orderQty} = ${money(o.total)} · stock ${o.stock}`)))));
+}
+
+function renderPricing() {
+  const table = $("#pricing-table");
+  if (!pricing || !current) { table.replaceChildren(); $("#pricing-foot").hidden = true; return; }
+
+  const heads = ["Part", "Need", "Search", "Best option", "Unit", "Total"];
+  const numCols = new Set([1, 4, 5]);
+  const tbody = el("tbody");
+  let total = 0, priced = 0, buyable = 0;
+
+  current.summary.forEach((s, i) => {
+    const r = pricing[i] || {};
+    const lead = [el("td", {}, s.component, el("div", { class: "muted" }, s.value || "")),
+                  el("td", { class: "num" }, String(r.needQty ?? s.quantity))];
+    if (r.skipped) {
+      tbody.append(el("tr", {}, ...lead, el("td", { colspan: 4, class: "muted" }, r.skipped)));
+      return;
+    }
+    buyable++;
+
+    const input = el("input", {
+      type: "text", class: "q", value: r.query ?? "", maxlength: 250, placeholder: "search terms, then Enter",
+      "aria-label": `Search for ${s.component} ${s.value}`.trim(),
+      onkeydown: (e) => { if (e.key === "Enter") lookupPricing([i], { [i]: e.target.value }); },
+    });
+    const searchCell = el("td", {}, input);
+    if (r.assumed) searchCell.append(el("div", {}, el("span", { class: "tag", title: r.note || "Details assumed" }, "assumed")));
+
+    const best = r.options && r.options[0];
+    if (best) {
+      priced++; total += best.total;
+      const meta = [partMeta(best), `${best.stock.toLocaleString()} in stock`].filter(Boolean).join(" · ");
+      const cell = el("td", { class: "best" }, partLink(best), el("div", { class: "muted" }, meta));
+      if (best.buyMore) {
+        cell.append(el("div", { class: "muted" }, `Buy ${best.buyMore.quantity} for ${money(best.buyMore.total)} (cheaper)`));
+      }
+      if (r.options.length > 1) {
+        cell.append(el("button", { class: "link", onclick: (e) => {
+          const alt = e.target.closest("tr").nextElementSibling;
+          alt.hidden = !alt.hidden;
+        } }, `${r.options.length - 1} more`));
+      }
+      tbody.append(el("tr", {}, ...lead, searchCell, cell,
+        el("td", { class: "num" }, money(best.unitPrice)), el("td", { class: "num" }, money(best.total))));
+      if (r.options.length > 1) tbody.append(altRow(r.options.slice(1)));
+    } else {
+      const [text, cls] = r.error ? [r.error, "err"]
+        : !r.query ? [r.note || "Type a search and press Enter", "muted"]
+        : [$("#instock").checked ? "No in-stock match found" : "No match found", "muted"];
+      tbody.append(el("tr", {}, ...lead, searchCell, el("td", { colspan: 3, class: cls }, text)));
+    }
+  });
+
+  table.replaceChildren(
+    el("thead", {}, el("tr", {}, ...heads.map((h, i) => el("th", { class: numCols.has(i) ? "num" : "" }, h)))),
+    tbody);
+  $("#pricing-foot").hidden = false;
+  $("#pricing-total").textContent =
+    `Cheapest total: ${money(total)} for ${priced} of ${buyable} purchasable lines.`;
+}
+
+async function lookupPricing(indexes, overrides = {}) {
+  for (const [i, v] of Object.entries(overrides)) {
+    if (v.trim()) manualQueries[i] = v.trim(); else delete manualQueries[i];
+  }
+  const boards = Math.max(1, Math.floor(Number($("#boards").value)) || 1);
+  const items = indexes.map((i) => {
+    const s = current.summary[i];
+    const item = { component: s.component, value: s.value, details: s.details, quantity: s.quantity };
+    if (manualQueries[i]) item.query = manualQueries[i];
+    return item;
+  });
+  const go = $("#price-go");
+  go.disabled = true;
+  setPStatus(indexes.length > 1 ? "Looking up prices…" : "Searching…");
+  try {
+    const data = await api("/api/pricing", {
+      method: "POST",
+      body: JSON.stringify({ items, package: $("#pkg").value, inStock: $("#instock").checked, boards }),
+    });
+    if (!pricing) pricing = new Array(current.summary.length).fill(null);
+    data.results.forEach((r, k) => { pricing[indexes[k]] = r; });
+    renderPricing();
+    setPStatus("");
+  } catch (e) {
+    setPStatus(e.message, true);
+  } finally {
+    go.disabled = false;
+  }
+}
+
+function pricingTable() {
+  const headers = ["Component", "Value", "Needed", "Search", "Part #", "DigiKey #", "Manufacturer",
+                   "Package", "Order qty", "Unit price (USD)", "Total (USD)", "In stock", "URL", "Note"];
+  const rows = current.summary.map((s, i) => {
+    const r = pricing[i] || {};
+    const o = r.options && r.options[0];
+    return [s.component, s.value, r.needQty ?? s.quantity, r.query ?? "", o?.mpn ?? "", o?.dkpn ?? "",
+            o?.manufacturer ?? "", o?.packaging ?? "", o?.orderQty ?? "", o?.unitPrice ?? "", o?.total ?? "",
+            o?.stock ?? "", o?.url ?? "", r.skipped || r.error || (o ? "" : "No match")];
+  });
+  return { headers, rows };
+}
+
+$("#price-go").addEventListener("click", () => {
+  if (current) lookupPricing(current.summary.map((_, i) => i));
+});
+$("#pricing-copy").addEventListener("click", async () => {
+  const { headers, rows } = pricingTable();
+  try {
+    await navigator.clipboard.writeText(delimited("\t", headers, rows));
+    setPStatus("Copied. Paste into a Google Sheets cell to fill the table.");
+  } catch { setPStatus("Couldn't access the clipboard. Use Download CSV instead.", true); }
+});
+$("#pricing-download").addEventListener("click", () => {
+  const { headers, rows } = pricingTable();
+  const blob = new Blob(["﻿" + delimited(",", headers, rows)], { type: "text/csv;charset=utf-8" });
+  const a = el("a", { href: URL.createObjectURL(blob), download: "circuit_pricing.csv" });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+
+// ---------- DigiKey orders ----------
+let ordersData = null;   // the page of orders currently shown
+
+const fmtDate = (s) => { const d = new Date(s); return Number.isNaN(d.getTime()) ? "" : d.toLocaleDateString(); };
+const ymd = (d) => d.toLocaleDateString("en-CA"); // YYYY-MM-DD in the viewer's time zone
+const moneyIn = (n, cur) => (n == null ? "" : !cur || cur === "USD" ? money(n) : `${n.toFixed(2)} ${cur}`);
+function setOStatus(msg, isError = false) {
+  const s = $("#orders-status");
+  s.textContent = msg || "";
+  s.className = isError ? "error" : "";
+}
+
+function updateOrdersGate() {
+  const cfg = Boolean(me.user && me.orders && me.orders.configured);
+  $("#orders").hidden = !cfg;
+  if (!cfg) return;
+  const on = Boolean(me.orders.connected);
+  $("#orders-connect").hidden = on;
+  $("#orders-controls").hidden = !on;
+  $("#orders-disconnect").hidden = !on;
+  $("#orders-msg").textContent = on ? "" :
+    "Connect your own DigiKey account to see your order history. You sign in at DigiKey and approve access; this app never sees your DigiKey password.";
+  if (on && !$("#o-end").value) {
+    const now = new Date();
+    $("#o-end").value = ymd(now);
+    $("#o-start").value = ymd(new Date(now.getTime() - 30 * 86400000));
+  }
+}
+
+function resetOrders() {
+  ordersData = null;
+  setOStatus("");
+  renderOrders();
+}
+
+function itemsTable(items) {
+  if (!items.length) return el("p", { class: "muted" }, "No line items returned.");
+  const rows = items.flatMap((it) => {
+    const detail = [it.ordered != null && it.shipped != null ? `${it.shipped} shipped` : "", it.backOrder ? `${it.backOrder} back-ordered` : ""]
+      .filter(Boolean).join(" · ");
+    const out = [el("tr", {},
+      el("td", {}, it.dkpn),
+      el("td", { class: "best" }, it.mpn, el("div", { class: "muted" }, [it.description, it.packType].filter(Boolean).join(" · "))),
+      el("td", { class: "num" }, it.ordered == null ? "" : String(it.ordered), el("div", { class: "muted" }, detail)),
+      el("td", { class: "num" }, money(it.unitPrice)))];
+    for (const s of it.shipments) {
+      const parts = [`Shipped ${s.quantity ?? ""}`.trim(), s.date ? `on ${fmtDate(s.date)}` : "", s.tracking ? `tracking ${s.tracking}` : "",
+                     s.expected ? `expected ${fmtDate(s.expected) || s.expected}` : ""].filter(Boolean);
+      out.push(el("tr", {}, el("td", { colspan: 4, class: "muted" }, parts.join(" · "))));
+    }
+    return out;
+  });
+  return el("table", {},
+    el("thead", {}, el("tr", {}, ...["DigiKey #", "Part", "Qty", "Unit"].map((h, i) => el("th", { class: i >= 2 ? "num" : "" }, h)))),
+    el("tbody", {}, ...rows));
+}
+
+function salesOrderBlock(so, currency) {
+  const holder = el("div");
+  const showItems = (items) => holder.replaceChildren(itemsTable(items));
+  const btn = el("button", { class: "link", onclick: async () => {
+    if (so.items.length) { showItems(so.items); btn.remove(); return; }
+    btn.disabled = true;
+    try {
+      const d = await api(`/api/orders/${so.id}`);
+      so.items = d.items;
+      showItems(d.items);
+      btn.remove();
+    } catch (e) {
+      btn.disabled = false;
+      holder.replaceChildren(el("p", { class: "err" }, e.message));
+    }
+  } }, "Show items");
+  const summary = [so.statusText || so.status, so.shipMethod, so.shipTo, moneyIn(so.total, so.currency || currency)].filter(Boolean).join(" · ");
+  return el("div", { class: "so" }, el("strong", {}, `Sales order ${so.id ?? ""}`), summary ? ` · ${summary}` : "", btn, holder);
+}
+
+function renderOrders() {
+  const table = $("#orders-table");
+  if (!ordersData) { table.replaceChildren(); $("#orders-foot").hidden = true; return; }
+  const d = ordersData;
+  const tbody = el("tbody");
+  if (!d.orders.length) {
+    tbody.append(el("tr", {}, el("td", { colspan: 5, class: "muted" }, "No orders in this date range.")));
+  }
+  for (const o of d.orders) {
+    const toggle = el("button", { class: "link", onclick: (e) => {
+      const sub = e.target.closest("tr").nextElementSibling;
+      sub.hidden = !sub.hidden;
+      e.target.textContent = sub.hidden ? "Details" : "Hide";
+    } }, "Details");
+    tbody.append(
+      el("tr", {},
+        el("td", {}, String(o.orderNumber ?? ""), o.po ? el("div", { class: "muted" }, `PO ${o.po}`) : ""),
+        el("td", {}, fmtDate(o.date)),
+        el("td", {}, o.statusText || o.status || ""),
+        el("td", { class: "num" }, moneyIn(o.total, o.currency)),
+        el("td", {}, toggle)),
+      el("tr", { class: "sub", hidden: true },
+        el("td", { colspan: 5 }, ...(o.salesOrders.length ? o.salesOrders.map((so) => salesOrderBlock(so, o.currency))
+                                                          : [el("p", { class: "muted" }, "No sales orders returned.")]))));
+  }
+  table.replaceChildren(
+    el("thead", {}, el("tr", {}, ...["Order", "Date", "Status", "Total", ""].map((h, i) => el("th", { class: i === 3 ? "num" : "" }, h)))),
+    tbody);
+  const pages = Math.max(1, Math.ceil(d.total / d.pageSize));
+  $("#o-page").textContent = `Page ${d.page} of ${pages} · ${d.total} order${d.total === 1 ? "" : "s"}`;
+  $("#o-prev").disabled = d.page <= 1;
+  $("#o-next").disabled = d.page >= pages;
+  $("#orders-foot").hidden = false;
+}
+
+async function loadOrders(page = 1) {
+  const start = $("#o-start").value, end = $("#o-end").value;
+  if (!start || !end) { setOStatus("Pick a start and end date.", true); return; }
+  const go = $("#o-go");
+  go.disabled = true;
+  setOStatus("Loading orders…");
+  try {
+    const qs = new URLSearchParams({ start, end, page, shared: $("#o-shared").checked });
+    ordersData = await api(`/api/orders?${qs}`);
+    renderOrders();
+    setOStatus("");
+  } catch (e) {
+    if (e.data && e.data.notConnected) {
+      me.orders.connected = false;
+      resetOrders();
+      updateOrdersGate();
+      $("#orders-msg").textContent = "Your DigiKey connection has ended. Connect again to keep viewing orders.";
+    }
+    setOStatus(e.message, true);
+  } finally {
+    go.disabled = false;
+  }
+}
+
+$("#o-go").addEventListener("click", () => loadOrders(1));
+$("#o-prev").addEventListener("click", () => ordersData && loadOrders(ordersData.page - 1));
+$("#o-next").addEventListener("click", () => ordersData && loadOrders(ordersData.page + 1));
+$("#orders-disconnect").addEventListener("click", async () => {
+  if (!confirm("Disconnect your DigiKey account from this app? You can reconnect any time.")) return;
+  try {
+    await api("/auth/digikey/disconnect", { method: "POST" });
+    me.orders.connected = false;
+    resetOrders();
+    updateOrdersGate();
+  } catch (e) { setOStatus(e.message, true); }
+});
+$("#o-download").addEventListener("click", () => {
+  if (!ordersData) return;
+  const headers = ["Order", "Sales order", "Date", "Status", "PO", "Ship method", "Ship to", "Total", "Currency"];
+  const rows = ordersData.orders.flatMap((o) => (o.salesOrders.length ? o.salesOrders : [{}]).map((so) =>
+    [o.orderNumber ?? "", so.id ?? "", o.date, so.statusText || so.status || o.statusText || o.status, so.po || o.po,
+     so.shipMethod ?? "", so.shipTo ?? "", so.total ?? o.total ?? "", so.currency || o.currency]));
+  const blob = new Blob(["﻿" + delimited(",", headers, rows)], { type: "text/csv;charset=utf-8" });
+  const a = el("a", { href: URL.createObjectURL(blob), download: "digikey_orders.csv" });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
 
 // ---------- input ----------
 async function generate() {
@@ -337,6 +844,10 @@ $("#file").addEventListener("change", async (e) => {
   try { me = await api("/api/me"); } catch {}
   renderAuth();
   loadHistory().catch(() => {});
+  if (new URLSearchParams(location.search).get("digikey") === "connected") {
+    history.replaceState(null, "", location.pathname); // tidy the URL after the DigiKey redirect
+    if (me.orders && me.orders.connected) { setOStatus("DigiKey account connected."); loadOrders(1); }
+  }
 })();
 </script>
 </body>

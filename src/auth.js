@@ -17,7 +17,7 @@ export function parseCookies(req) {
   return out;
 }
 
-function cookie(name, value, { maxAge, secure }) {
+export function cookie(name, value, { maxAge, secure }) {
   return `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure ? "; Secure" : ""}`;
 }
 
@@ -26,12 +26,12 @@ async function sha256Hex(s) {
   return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-function randomToken(bytes = 32) {
+export function randomToken(bytes = 32) {
   const a = crypto.getRandomValues(new Uint8Array(bytes));
   return btoa(String.fromCharCode(...a)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-const page = (msg, status) =>
+export const page = (msg, status) =>
   new Response(`<!doctype html><meta charset="utf-8"><title>Sign-in</title>
 <body style="font:16px system-ui;max-width:32rem;margin:4rem auto;padding:0 1rem">
 <p>${msg}</p><p><a href="/">Back to the app</a></p></body>`,
@@ -61,6 +61,11 @@ async function createSession(env, userId) {
       .bind(await sha256Hex(token), userId, Date.now() + SESSION_MS),
   ]);
   return token;
+}
+
+/** Start a session for userId and return the Set-Cookie value for it. Shared by every sign-in method. */
+export async function sessionCookie(env, userId, secure) {
+  return cookie("sid", await createSession(env, userId), { maxAge: SESSION_MS / 1000, secure });
 }
 
 // ---------- routes ----------

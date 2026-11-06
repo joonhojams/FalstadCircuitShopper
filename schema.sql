@@ -36,3 +36,44 @@ CREATE TABLE IF NOT EXISTS queries (
   created_at   INTEGER NOT NULL          -- epoch ms
 );
 CREATE INDEX IF NOT EXISTS idx_queries_user ON queries(user_id, id DESC);
+
+-- DigiKey price lookups. Short-lived cache so repeat lookups don't spend API quota.
+CREATE TABLE IF NOT EXISTS pricing_cache (
+  cache_key  TEXT PRIMARY KEY,           -- "<search>|<quantity>|<in-stock flag>"
+  result     TEXT NOT NULL,              -- JSON array of options
+  fetched_at INTEGER NOT NULL            -- epoch ms
+);
+
+-- Searches made per UTC day, to stay under DigiKey's daily request limit.
+CREATE TABLE IF NOT EXISTS api_usage (
+  day   TEXT PRIMARY KEY,                -- YYYY-MM-DD (UTC)
+  count INTEGER NOT NULL
+);
+
+-- Each user's own DigiKey connection (3-legged OAuth). Tokens are AES-GCM encrypted
+-- with the TOKEN_ENCRYPTION_KEY secret before they are stored.
+CREATE TABLE IF NOT EXISTS digikey_links (
+  user_id            TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  access_token       TEXT NOT NULL,      -- encrypted
+  refresh_token      TEXT NOT NULL,      -- encrypted; DigiKey rotates it on every refresh
+  access_expires_at  INTEGER NOT NULL,   -- epoch ms
+  refresh_expires_at INTEGER NOT NULL,   -- epoch ms
+  version            INTEGER NOT NULL DEFAULT 0,  -- bumped on every refresh (compare-and-swap)
+  created_at         INTEGER NOT NULL
+);
+
+-- Email + password sign-in. The account itself is an identities row
+-- (provider 'email', provider_user_id = lower-cased email); only the hash lives here.
+CREATE TABLE IF NOT EXISTS passwords (
+  user_id    TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  hash       TEXT NOT NULL,              -- base64 PBKDF2-SHA256 output
+  salt       TEXT NOT NULL,              -- base64, random per user
+  iterations INTEGER NOT NULL            -- stored per row so the cost can be raised later
+);
+
+-- Failed sign-in counters (per email and per IP) to slow down password guessing.
+CREATE TABLE IF NOT EXISTS auth_throttle (
+  key      TEXT PRIMARY KEY,             -- "e:<email>" or "ip:<address>"
+  count    INTEGER NOT NULL,
+  reset_at INTEGER NOT NULL              -- epoch ms
+);
