@@ -24,6 +24,19 @@ const partNumber = (s) => {
   return /^[A-Za-z0-9][A-Za-z0-9-]{2,}$/.test(t) && /\d/.test(t) && !/^default/i.test(t) ? t : null;
 };
 
+// Part types a user can prefer (see preferences.js). Used only when they have chosen one.
+const RES_TYPES = { metal_film: "METAL FILM", carbon_film: "CARBON FILM", thick_film: "THICK FILM" };
+const CAP_TYPES = {
+  ceramic: { word: "CER", v: { smd: "25V 0805", tht: "50V RADIAL" } },
+  film: { word: "FILM", v: { smd: "50V SMD", tht: "63V RADIAL" } },
+  aluminum: { word: "ALUM", v: { smd: "25V SMD", tht: "25V RADIAL" } },
+  tantalum: { word: "TANT", v: { smd: "16V SMD", tht: "16V RADIAL" } },
+};
+const capQuery = (type, pkg, f) => {
+  const t = CAP_TYPES[type];
+  return `CAP ${t.word} ${f}${t.v[pkg] ? ` ${t.v[pkg]}` : ""}`;
+};
+
 // Simulation-only elements: nothing to buy.
 const NO_BUY = {
   "Voltage Source": "Simulation source, not a part",
@@ -36,9 +49,10 @@ const NO_BUY = {
 /**
  * @param {{component: string, value?: string, details?: string}} row
  * @param {"tht"|"smd"|"any"} pkg  preferred mounting style
+ * @param {{capType?: string, resType?: string}} [opts]  part type from the user's preferences
  * @returns {{skip: string} | {query: string|null, assumed?: boolean, note?: string}}
  */
-export function buildQuery(row, pkg = "tht") {
+export function buildQuery(row, pkg = "tht", opts = {}) {
   const { component, value = "", details = "" } = row;
   if (NO_BUY[component]) return { skip: NO_BUY[component] };
 
@@ -50,6 +64,10 @@ export function buildQuery(row, pkg = "tht") {
 
   switch (component) {
     case "Resistor":
+      if (n !== null && opts.resType && RES_TYPES[opts.resType]) {
+        const size = tht ? " 1/4W AXIAL" : smd ? " 1/8W 0805" : "";
+        return { query: `RES ${ohms(n)} OHM${size} ${RES_TYPES[opts.resType]}` };
+      }
       return n === null ? none : { query: `RES ${ohms(n)} OHM${tht ? " 1/4W AXIAL" : smd ? " 1/8W 0805" : ""}` };
 
     case "Potentiometer":
@@ -58,6 +76,10 @@ export function buildQuery(row, pkg = "tht") {
     case "Capacitor": {
       if (n === null) return none;
       const f = farads(n);
+      if (opts.capType && CAP_TYPES[opts.capType]) {
+        return guess(capQuery(opts.capType, pkg, f),
+          "Voltage rating assumed (type from your preferences). Electrolytic and tantalum parts are polarised. Edit the search to change.");
+      }
       const note = "Voltage rating and type assumed (ceramic below 1 µF, electrolytic above; check polarity). Edit the search to change.";
       if (smd) return guess(n <= 10e-6 ? `CAP CER ${f} 25V 0805` : `CAP ALUM ${f} 25V SMD`, note);
       if (tht) return guess(n < 1e-6 ? `CAP CER ${f} 50V RADIAL` : `CAP ALUM ${f} 25V RADIAL`, note);
@@ -104,4 +126,28 @@ export function buildQuery(row, pkg = "tht") {
     default:
       return none;
   }
+}
+
+/**
+ * The searches to try for a row, best first: for each mounting style in the user's ranking, for each
+ * part type in their ranking. At most `max` distinct searches are returned.
+ * @param {{mounting?: string[], capacitor?: string[], resistor?: string[]}} prefs  the user's ranked lists
+ * @param {string[]} mounts  mounting styles to try, in order ("tht" | "smd" | "any")
+ */
+export function candidates(row, mounts, prefs = {}, max = 3) {
+  const types = row.component === "Capacitor" ? prefs.capacitor : row.component === "Resistor" ? prefs.resistor : null;
+  const out = [];
+  const seen = new Set();
+  for (const mount of mounts.length ? mounts : ["tht"]) {
+    for (const type of types?.length ? types : [null]) {
+      const built = buildQuery(row, mount, type ? { capType: type, resType: type } : {});
+      if (built.skip) return [built];
+      const key = built.query?.toLowerCase() ?? "";
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(built);
+      if (out.length >= max) return out;
+    }
+  }
+  return out;
 }

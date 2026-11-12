@@ -1,7 +1,9 @@
 import { bom } from "./parser.js";
 import { login, callback, logout, getUser, authConfigured } from "./auth.js";
 import { register, signIn } from "./password.js";
-import { buildQuery } from "./queries.js";
+import { analyse, SERIES } from "./networks.js";
+import { CATALOG, validatePreferences, loadPreferences, savePreferences } from "./preferences.js";
+import { candidates } from "./queries.js";
 import { cheapestOptions } from "./pricing.js";
 import { DigiKeyError, digikeyConfigured, getToken, searchKeyword } from "./digikey.js";
 import {
@@ -49,12 +51,15 @@ export default {
             configured: ordersConfigured(env),
             connected: user && ordersConfigured(env) ? await isConnected(env, user.id) : false,
           },
+          hasPreferences: user ? Boolean(await loadPreferences(env, user.id)) : false,
           user: user &&{ name: user.name, email: user.email, picture: user.picture },
         });
       }
 
       if (pathname === "/api/bom" && req.method === "POST") return handleBom(req, env);
       if (pathname === "/api/pricing" && req.method === "POST") return handlePricing(req, env);
+      if (pathname === "/api/networks" && req.method === "POST") return handleNetworks(req);
+      if (pathname === "/api/settings") return handleSettings(req, env);
 
       // ----- DigiKey order history (each user connects their own DigiKey account) -----
       if (pathname === "/auth/digikey/login" && req.method === "GET") return connectLogin(req, env);
@@ -179,6 +184,8 @@ async function handleOrder(req, env, salesOrderId) {
 }
 
 const PRICING = {
+  maxSearches: 40,              // DigiKey requests per call, fallbacks included (Workers Free allows 50 subrequests)
+  maxTries: 3, // searches per line at most: the first choice plus up to two fallbacks from the user's ranking
   maxItems: 40,                 // BOM lines per request (also keeps us under the Workers Free subrequest cap)
   dailyLookups: 900,            // DigiKey allows 1,000 requests/day per app; keep headroom
   cacheMs: 60 * 60 * 1000,      // how long a result is reused
@@ -197,59 +204,67 @@ async function handlePricing(req, env) {
   if (items.length === 0) return json({ error: "No items provided" }, 400);
   if (items.length > PRICING.maxItems) return json({ error: `Too many lines (max ${PRICING.maxItems})` }, 413);
 
-  const pkg = ["tht", "smd", "any"].includes(body.package) ? body.package : "tht";
+  // "pref" means: use the user's own ranking (saved on the server, never taken from the request).
+  const prefs = (await loadPreferences(env, user.id)) ?? {};
+  const mode = ["tht", "smd", "any", "pref"].includes(body.package) ? body.package : "tht";
+  const mounts = mode === "pref" ? (prefs.mounting?.length ? prefs.mounting : ["tht"]) : [mode];
   const inStock = body.inStock !== false;
   const boards = Math.min(1000, Math.max(1, Math.floor(Number(body.boards)) || 1));
   const str = (v, n) => (typeof v === "string" ? v.slice(0, n) : "");
 
-  // 1. Decide what to search for on each line.
+  // 1. Decide what to search for on each line: the best choice first, then fallbacks in ranked order.
   const plan = items.map((it) => {
     const qty = Math.floor(Number(it?.quantity));
     if (!(qty >= 1)) return { error: "Invalid quantity" };
     const needQty = Math.min(1_000_000, qty * boards);
     const override = str(it?.query, 250).trim();
-    const built = override
-      ? { query: override }
-      : buildQuery({ component: str(it?.component, 60), value: str(it?.value, 60), details: str(it?.details, 120) }, pkg);
-    if (built.skip) return { skipped: built.skip, needQty };
-    if (!built.query) return { query: "", note: built.note, needQty };
-    return { query: built.query, assumed: Boolean(built.assumed), note: built.note ?? "", needQty };
+    const options = override
+      ? [{ query: override }]
+      : candidates({ component: str(it?.component, 60), value: str(it?.value, 60), details: str(it?.details, 120) }, mounts, prefs, PRICING.maxTries);
+    const first = options[0] ?? { query: null, note: "No automatic search for this part. Type a search in the box and press Enter." };
+    if (first.skip) return { skipped: first.skip, needQty };
+    if (!first.query) return { query: "", note: first.note, needQty };
+    return { candidates: options.filter((c) => c.query), idx: 0, query: first.query, assumed: Boolean(first.assumed), note: first.note ?? "", needQty };
   });
-  const searches = plan.filter((p) => p.query);
   const keyOf = (p) => `${p.query.toLowerCase()}|${p.needQty}|${inStock ? 1 : 0}`;
 
-  // 2. Reuse recent results (one query for all lines).
-  const keys = [...new Set(searches.map(keyOf))];
-  if (keys.length) {
-    const { results } = await env.DB
-      .prepare(`SELECT cache_key, result FROM pricing_cache
-                WHERE fetched_at > ? AND cache_key IN (${keys.map(() => "?").join(",")})`)
-      .bind(Date.now() - PRICING.cacheMs, ...keys).all();
-    const hit = new Map(results.map((r) => [r.cache_key, r.result]));
-    for (const p of searches) {
-      const h = hit.get(keyOf(p));
-      if (h) { p.options = JSON.parse(h); p.cached = true; }
+  // One pass over some lines: reuse cached results, respect the daily budget, ask DigiKey for the rest.
+  // Returns a Response only for a failure that ends the whole request.
+  let fetched = 0; // DigiKey searches made so far in this request
+  const runPass = async (lines) => {
+    // Reuse recent results (one query for all lines).
+    const keys = [...new Set(lines.map(keyOf))];
+    if (keys.length) {
+      const { results } = await env.DB
+        .prepare(`SELECT cache_key, result FROM pricing_cache
+                  WHERE fetched_at > ? AND cache_key IN (${keys.map(() => "?").join(",")})`)
+        .bind(Date.now() - PRICING.cacheMs, ...keys).all();
+      const hit = new Map(results.map((r) => [r.cache_key, r.result]));
+      for (const p of lines) {
+        const h = hit.get(keyOf(p));
+        if (h) { p.options = JSON.parse(h); p.cached = true; }
+      }
     }
-  }
 
-  // 3. Check the daily budget for the lookups that still need DigiKey.
-  const misses = searches.filter((p) => !p.cached);
-  let runnable = misses;
-  if (misses.length) {
-    const day = new Date().toISOString().slice(0, 10);
-    const used = (await env.DB.prepare("SELECT count FROM api_usage WHERE day = ?").bind(day).first())?.count ?? 0;
-    const allowed = Math.max(0, PRICING.dailyLookups - used);
-    runnable = misses.slice(0, allowed);
-    for (const p of misses.slice(allowed)) p.error = "Daily DigiKey lookup limit reached. Try again tomorrow.";
-    if (runnable.length) {
-      await env.DB
-        .prepare("INSERT INTO api_usage (day, count) VALUES (?, ?) ON CONFLICT(day) DO UPDATE SET count = count + excluded.count")
-        .bind(day, runnable.length).run();
+    // Check the daily budget for the lookups that still need DigiKey.
+    const misses = lines.filter((p) => !p.cached);
+    let runnable = misses;
+    if (misses.length) {
+      const day = new Date().toISOString().slice(0, 10);
+      const used = (await env.DB.prepare("SELECT count FROM api_usage WHERE day = ?").bind(day).first())?.count ?? 0;
+      const allowed = Math.max(0, PRICING.dailyLookups - used);
+      runnable = misses.slice(0, allowed);
+      for (const p of misses.slice(allowed)) p.error = "Daily DigiKey lookup limit reached. Try again tomorrow.";
+      if (runnable.length) {
+        await env.DB
+          .prepare("INSERT INTO api_usage (day, count) VALUES (?, ?) ON CONFLICT(day) DO UPDATE SET count = count + excluded.count")
+          .bind(day, runnable.length).run();
+      }
     }
-  }
+    if (!runnable.length) return null;
+    fetched += runnable.length;
 
-  // 4. Search DigiKey, a few at a time.
-  if (runnable.length) {
+    // Search DigiKey, a few at a time.
     try { await getToken(env); } catch (e) {
       if (e instanceof DigiKeyError) return json({ error: e.message }, e.status === 429 ? 429 : 502);
       throw e;
@@ -276,9 +291,8 @@ async function handlePricing(req, env) {
     };
     await Promise.all(Array.from({ length: Math.min(PRICING.concurrency, queue.length) }, worker));
 
-    // 5. Remember what we fetched (a few multi-row inserts, since D1 limits queries per request).
-    const fresh = new Map(runnable.filter((p) => p.fresh).map((p) => [keyOf(p), JSON.stringify(p.options)]));
-    const rows = [...fresh];
+    // Remember what we fetched (a few multi-row inserts, since D1 limits queries per request).
+    const rows = [...new Map(runnable.filter((p) => p.fresh).map((p) => [keyOf(p), JSON.stringify(p.options)]))];
     const now = Date.now();
     for (let i = 0; i < rows.length; i += 30) {
       const chunk = rows.slice(i, i + 30);
@@ -289,6 +303,24 @@ async function handlePricing(req, env) {
     }
     if (rows.length) {
       await env.DB.prepare("DELETE FROM pricing_cache WHERE fetched_at < ?").bind(now - PRICING.cacheMs).run();
+    }
+    return null;
+  };
+
+  let lines = plan.filter((p) => p.query);
+  for (let round = 0; round < PRICING.maxTries && lines.length; round++) {
+    const failed = await runPass(lines);
+    if (failed) return failed;
+    // Lines that found nothing move on to the next choice in the user's ranking.
+    lines = lines.filter((p) => !p.error && p.options && p.options.length === 0 && p.idx + 1 < p.candidates.length);
+    lines = lines.slice(0, Math.max(0, PRICING.maxSearches - fetched));
+    for (const p of lines) {
+      const next = p.candidates[++p.idx];
+      p.tried = [...(p.tried ?? []), p.query];
+      p.query = next.query;
+      p.assumed = Boolean(next.assumed);
+      p.note = [next.note, `Nothing matched ${p.tried.map((q) => `"${q}"`).join(", ")}, so this is the next choice in your ranking.`].filter(Boolean).join(" ");
+      p.options = undefined; p.cached = undefined; p.fresh = undefined;
     }
   }
 
@@ -304,8 +336,53 @@ async function handlePricing(req, env) {
       error: p.error,
       options: p.options,
       cached: p.cached ? true : undefined,
+      fellBack: p.tried?.length ? true : undefined,
     })),
   });
+}
+
+// Ranked part-type preferences (GET to read, PUT to save). Signed-in users only.
+async function handleSettings(req, env) {
+  if (req.method !== "GET" && req.method !== "PUT") return json({ error: "Method not allowed" }, 405);
+  const user = await getUser(req, env);
+  if (!user) return json({ error: "Sign in required" }, 401);
+
+  if (req.method === "PUT") {
+    let body;
+    try { body = await req.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
+    const checked = validatePreferences(body?.preferences);
+    if (!checked.ok) return json({ error: checked.error }, 400);
+    try {
+      await savePreferences(env, user.id, checked.value);
+    } catch (e) {
+      console.error(e);
+      return json({ error: "Settings can't be saved yet. The database needs updating (npm run db:init:remote)." }, 503);
+    }
+  }
+  return json({ preferences: await loadPreferences(env, user.id), catalog: CATALOG });
+}
+
+// Suggest series/parallel networks of common values for resistors and capacitors that aren't
+// in a standard E-series. Pure computation: no login, database or DigiKey needed.
+async function handleNetworks(req) {
+  let body;
+  try { body = await req.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
+  const text = typeof body?.text === "string" ? body.text : "";
+  if (!text.trim()) return json({ error: "No circuit text provided" }, 400);
+  if (text.length > MAX_TEXT) return json({ error: "Circuit is too large" }, 413);
+
+  const series = (v, dflt) => (v === undefined || v === null || v === "" ? dflt : SERIES.includes(v) ? v : null);
+  const resistorSeries = series(body.resistorSeries, "E24");
+  const capacitorSeries = series(body.capacitorSeries, "E12");
+  if (!resistorSeries || !capacitorSeries) return json({ error: `Series must be one of ${SERIES.join(", ")}` }, 400);
+  const tolerance = body.tolerance === undefined || body.tolerance === null || body.tolerance === "" ? 1 : Number(body.tolerance);
+  if (!Number.isFinite(tolerance) || tolerance < 0.1 || tolerance > 10) {
+    return json({ error: "Tolerance must be between 0.1 and 10 percent" }, 400);
+  }
+
+  const result = bom(text);
+  if (result.count === 0) return json({ error: "No components found. Is this a CircuitJS \"Export As Text\" file?" }, 422);
+  return json(analyse(result.summary, { resistorSeries, capacitorSeries, tolerance }));
 }
 
 async function handleBom(req, env) {

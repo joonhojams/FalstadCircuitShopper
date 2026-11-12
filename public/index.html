@@ -26,7 +26,7 @@
   #auth { display: flex; align-items: center; gap: 10px; font-size: 14px; }
   #auth img { width: 28px; height: 28px; border-radius: 50%; }
   main { max-width: 1100px; margin: 0 auto; padding: 0 16px 48px;
-         display: grid; grid-template-columns: 1fr; gap: 16px; align-items: start; }
+         display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
   main.with-history { grid-template-columns: minmax(0, 1fr) 280px; }
   @media (max-width: 800px) { main.with-history { grid-template-columns: 1fr; } }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
@@ -98,6 +98,14 @@
   button.link { border: 0; background: none; padding: 0; margin-left: 8px; color: var(--accent);
                 text-decoration: underline; font-size: 13px; }
   a { color: var(--accent); }
+  .net-item { border-top: 1px solid var(--line); padding: 12px 0; }
+  .net-item:first-child { border-top: 0; }
+  .net-item h3 { margin: 0 0 6px; font-size: 15px; }
+  .net-item h3 small { color: var(--muted); font-weight: 400; }
+  .net-opt { margin: 6px 0 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 14px; }
+  .net-opt .eq { font-variant-numeric: tabular-nums; }
+  .net-opt small { display: block; color: var(--muted); margin-top: 2px; font-size: 12px; }
+  .net-opt .good { color: var(--accent); }
   tr.alt td { white-space: normal; background: var(--bg); font-size: 13px; }
   tr.alt ul { margin: 0; padding-left: 18px; }
   [hidden] { display: none !important; }
@@ -171,6 +179,7 @@
           <label>Boards <input type="number" id="boards" min="1" max="1000" value="1" style="width:5.5rem"></label>
           <label>Parts
             <select id="pkg">
+              <option value="pref" hidden>My preferences</option>
               <option value="tht">Through-hole</option>
               <option value="smd">Surface-mount</option>
               <option value="any">Any</option>
@@ -191,9 +200,22 @@
         </div>
         <p class="warn">DigiKey list prices in USD, for the quantity you need (price breaks and minimum orders included).
           Searches are guesses from the circuit alone: it has no package, tolerance, voltage rating or part number.
-          Parts tagged “assumed” are generic stand-ins. Edit any search and press Enter to re-check that line. The cheapest option is picked
+          Parts tagged “assumed” are generic stand-ins. “Next choice” means nothing in stock matched a higher-ranked type from your settings. Edit any search and press Enter to re-check that line. The cheapest option is picked
           from DigiKey's top matches, so always confirm the part before ordering.</p>
       </div>
+    </div>
+
+    <div class="card" id="networks" hidden>
+      <h2>Common-value alternatives</h2>
+      <p class="hint">Resistors and capacitors that aren't common stock values can often be built from a series or parallel pair of common ones. Networks made from values already on your list are shown first, since reusing a value saves ordering another one. Your parts list isn't changed.</p>
+      <div class="row">
+        <label>Resistors <select id="net-rs"><option>E6</option><option>E12</option><option selected>E24</option><option>E48</option><option>E96</option></select></label>
+        <label>Capacitors <select id="net-cs"><option>E6</option><option selected>E12</option><option>E24</option><option>E48</option><option>E96</option></select></label>
+        <label>Allowed error <select id="net-tol"><option value="0.5">±0.5%</option><option value="1" selected>±1%</option><option value="2">±2%</option><option value="5">±5%</option></select></label>
+        <button id="net-go">Find alternatives</button>
+      </div>
+      <div id="net-status" class="hint" style="margin-top:8px"></div>
+      <div id="net-out"></div>
     </div>
 
     <div class="card" id="orders" hidden>
@@ -313,6 +335,7 @@ function renderAuth() {
   if (me.user) {
     if (me.user.picture) box.append(el("img", { src: me.user.picture, alt: "", referrerpolicy: "no-referrer" }));
     box.append(el("span", {}, me.user.name || me.user.email || "Signed in"),
+      el("a", { class: "btn", href: "/settings.html" }, "Settings"),
       el("button", { onclick: signOut }, "Sign out"));
   } else {
     box.append(el("button", { class: "primary", onclick: openSignIn }, "Sign in"));
@@ -418,12 +441,76 @@ async function deleteHistory(id) {
   } catch (e) { setStatus(e.message, true); }
 }
 
+// ---------- common-value alternatives ----------
+const pct = (n) => `${n > 0 ? "+" : ""}${n}%`;
+
+function resetNetworks() {
+  $("#net-out").replaceChildren();
+  $("#net-status").textContent = "";
+}
+
+function renderNetworks(data) {
+  const out = $("#net-out");
+  out.replaceChildren();
+  const total = data.checked, odd = data.items.length;
+  $("#net-status").textContent = total === 0
+    ? "This circuit has no resistors or capacitors with a value."
+    : odd === 0
+      ? `All ${total} resistor and capacitor values are already common ${data.settings.resistorSeries}/${data.settings.capacitorSeries} values. Nothing to change.`
+      : `${odd} of ${total} resistor and capacitor values aren't common ${data.settings.resistorSeries}/${data.settings.capacitorSeries} values.` +
+        (data.truncated ? " Only the first 30 were checked." : "");
+  for (const it of data.items) {
+    const box = el("div", { class: "net-item" },
+      el("h3", {}, `${it.component} ${it.value} `, el("small", {},
+        `×${it.quantity} · not an ${it.series} value; nearest single part is ${it.nearest.label} (${pct(it.nearest.errPct)})`)));
+    if (it.nearest.withinTolerance) {
+      box.append(el("p", { class: "hint" }, `A single ${it.nearest.label} part is already within the allowed error, and one part is usually cheaper than two. The networks below are only for when that value won't do.`));
+    }
+    if (!it.options.length) {
+      box.append(el("p", { class: "hint" }, "No two-part network of common values is within the allowed error. Use the nearest part above, allow a larger error, or try a finer series."));
+    }
+    for (const o of it.options) {
+      const joiner = o.topology === "series" ? " + " : " ∥ ";
+      const reuse = o.parts.filter((x) => x.onBom).length;
+      box.append(el("div", { class: "net-opt" },
+        el("div", {},
+          el("strong", {}, o.topology === "series" ? "Series: " : "Parallel: "),
+          el("span", { class: "eq" }, `${o.parts[0].label}${joiner}${o.parts[1].label} = ${o.result} (${pct(o.errPct)})`)),
+        el("small", {},
+          `${o.totalParts} parts in total` +
+          (o.newValues === 0 ? " · " : ` · ${o.newValues} value${o.newValues > 1 ? "s" : ""} not yet on your list`),
+          o.newValues === 0 ? el("span", { class: "good" }, "uses only values already on your list") : "",
+          reuse && o.newValues ? ` · ${reuse} already on your list` : ""),
+        el("small", {}, o.note)));
+    }
+    out.append(box);
+  }
+}
+
+$("#net-go").addEventListener("click", async () => {
+  const text = $("#input").value;
+  if (!text.trim()) return;
+  const b = $("#net-go");
+  b.disabled = true;
+  $("#net-status").textContent = "Working…";
+  try {
+    renderNetworks(await api("/api/networks", { method: "POST", body: JSON.stringify({
+      text, resistorSeries: $("#net-rs").value, capacitorSeries: $("#net-cs").value, tolerance: Number($("#net-tol").value),
+    }) }));
+  } catch (e) {
+    $("#net-out").replaceChildren();
+    $("#net-status").textContent = e.message;
+  } finally { b.disabled = false; }
+});
+
 // ---------- results ----------
 function showResult(result, id = null, title = "") {
   current = result; currentId = id;
   $("#results").hidden = false;
   $("#pricing").hidden = false;
   resetPricing();
+  resetNetworks();
+  $("#networks").hidden = false;
   $("#result-title").textContent = title ? `Parts list · ${title}` : "Parts list";
   const unk = Object.entries(result.unknown || {});
   const w = $("#unknown");
@@ -499,8 +586,15 @@ function setPStatus(msg, isError = false) {
   s.className = isError ? "error" : "";
 }
 
+let pkgTouched = false;
+$("#pkg").addEventListener("change", () => { pkgTouched = true; });
+
 function updatePricingGate() {
   const ok = Boolean(me.user && me.pricing);
+  // "My preferences" appears once the user has saved a ranking, and is the default until they pick another.
+  $("#pkg option[value=pref]").hidden = !me.hasPreferences;
+  if (me.hasPreferences && !pkgTouched) $("#pkg").value = "pref";
+  if (!me.hasPreferences && $("#pkg").value === "pref") $("#pkg").value = "tht";
   $("#pricing-controls").hidden = !ok;
   const msg = $("#pricing-msg");
   msg.hidden = ok;
@@ -554,6 +648,7 @@ function renderPricing() {
       onkeydown: (e) => { if (e.key === "Enter") lookupPricing([i], { [i]: e.target.value }); },
     });
     const searchCell = el("td", {}, input);
+    if (r.fellBack) searchCell.append(el("div", {}, el("span", { class: "tag", title: r.note || "Next choice in your ranking" }, "next choice")));
     if (r.assumed) searchCell.append(el("div", {}, el("span", { class: "tag", title: r.note || "Details assumed" }, "assumed")));
 
     const best = r.options && r.options[0];

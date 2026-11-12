@@ -18,6 +18,8 @@ src/auth.js           Google sign-in, sessions, logout
 src/password.js       Email + password accounts, sign-in, rate limiting
 src/parser.js         CircuitJS export -> BOM (pure functions)
 src/queries.js        BOM line -> DigiKey search terms (heuristics)
+src/preferences.js    Ranked part-type preferences: catalog, validation, storage
+src/networks.js       Series/parallel alternatives for odd resistor and capacitor values
 src/pricing.js        Picks the cheapest option from DigiKey results (price breaks, MOQ, stock)
 src/digikey.js        DigiKey OAuth + keyword-search client
 src/digikey-link.js   Connect a user's own DigiKey account (3-legged OAuth), token refresh
@@ -123,6 +125,8 @@ Then add the deployed URL's `/auth/callback` to the Google client's redirect URI
 | Method | Path | Auth | Description |
 | --- | --- | --- | --- |
 | `POST` | `/api/bom` | optional | Body `{ text, title?, save? }`. Returns `{ count, summary, parts, unknown, id, saved }`. Saves to history when signed in (unless `save: false`). |
+| `GET` / `PUT` | `/api/settings` | yes | Read or save the user's ranked part-type preferences |
+| `POST` | `/api/networks` | no | Series/parallel alternatives for non-standard resistor and capacitor values. Body: `{ text, resistorSeries?, capacitorSeries?, tolerance? }` |
 | `POST` | `/api/pricing` | yes | Body `{ items: [{ component, value, details, quantity, query? }], package?, inStock?, boards? }`. Returns the cheapest DigiKey options per line. See below. |
 | `GET` | `/api/orders` | yes | The signed-in user's own DigiKey orders. Query: `start`, `end` (YYYY-MM-DD, default last 30 days), `page`, `pageSize` (max 25), `shared`. `409` with `notConnected: true` if they haven't connected DigiKey. |
 | `GET` | `/api/orders/:salesOrderId` | yes | One sales order with line items and shipments |
@@ -141,6 +145,40 @@ Then add the deployed URL's `/auth/callback` to the Google client's redirect URI
 | `POST` | `/auth/logout` | no | End the session |
 
 Limits: 500,000 characters per circuit, 200 saved circuits per user (oldest are dropped). Resubmitting the same circuit twice in a row doesn't create a duplicate entry.
+
+## Settings: part preferences
+
+Signed-in users get a **Settings** page (the button in the header, or `/settings.html`) where they rank the part types they prefer, best first. Drag the handle or use the arrow buttons to reorder, and untick a type to never use it:
+
+- **Mounting style:** surface mount (SMD), through-hole
+- **Capacitor type:** ceramic, film, aluminum electrolytic, tantalum
+- **Resistor type:** metal film, carbon film, thick film (chip)
+
+For example, SMD then through-hole, and aluminum then film then ceramic.
+
+**How the ranking is used.** In the DigiKey price lookup, **Parts** gets a **My preferences** option (selected automatically once you've saved a ranking). Each line is searched with your first choice. If nothing in stock matches, the next choice is searched, up to 3 searches per line, and the row is tagged **next choice** with an explanation. Mounting style is the main ordering: every type is tried in one mounting style before moving to the next. Picking Through-hole, Surface-mount or Any in the **Parts** menu instead overrides the mounting ranking, but your capacitor and resistor type rankings still apply. A search you type in yourself is never rewritten or retried.
+
+**Limits.**
+- Preferences only guide the price lookup. They don't change the parts list or the alternatives card.
+- The voltage rating, size and tolerance in each search are still assumptions (see the price lookup section). Edit any search to change them.
+- Fallbacks cost DigiKey requests. A single lookup makes at most 40 searches in total, fallbacks included.
+- Preferences are stored per user in the `user_settings` table. Run `npm run db:init:remote` (and `db:init:local`) once after updating. Until then, saving shows a message asking for that.
+
+API: `GET /api/settings` returns `{ preferences, catalog }`; `PUT /api/settings` with `{ preferences: { mounting: ["smd","tht"], capacitor: ["aluminum","film","ceramic"] } }` saves. Both need sign-in. An empty list means no preference for that category.
+
+## Common-value alternatives
+
+The **Common-value alternatives** card finds resistors and capacitors in your parts list whose value isn't a common stock value, and suggests building each from a series or parallel pair of common ones. Click **Find alternatives** after generating a parts list.
+
+- **Settings:** the E-series to treat as "common" for resistors (default E24) and capacitors (default E12), and the allowed error (default ±1%).
+- **Single part first:** if the nearest common value is already within the allowed error, the card says so. One part is usually cheaper than two.
+- **Ranking:** networks built only from values already on your parts list come first, since reusing a value saves ordering another one. Then fewer new values, then the smallest error.
+- **Limits:** pairs only (two parts), and the first 30 non-standard values are checked. Your parts list is never changed; this is advice.
+- **Caveats shown on each suggestion:** resistors split power, and series capacitors share voltage unevenly (use balancing resistors at higher voltages). Check ratings and tolerances before using one. Tolerances stack: two 5% parts can be off by more than 5% in total.
+- **Not included:** prices. A pair is two parts, so it only saves money if the common values are cheaper than the odd one. Compare with the DigiKey price lookup.
+- **CPU:** the finer series (E48, E96) take longer. If requests fail on the Workers Free plan with many odd values, use E24 or E12.
+
+It is an unauthenticated endpoint, `POST /api/networks`, that takes `{ text, resistorSeries?, capacitorSeries?, tolerance? }`.
 
 ## DigiKey price lookup (optional)
 

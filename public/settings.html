@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Settings · CircuitJS BOM</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1b1f24; --muted: #667085;
+    --line: #e3e6eb; --accent: #0b6e4f; --accent-text: #ffffff; --danger: #b42318;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101316; --card: #181c20; --text: #e8eaed; --muted: #98a2b3;
+      --line: #2a3037; --accent: #3ecf9e; --accent-text: #08231a; --danger: #f97066;
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+           max-width: 760px; margin: 0 auto; padding: 16px; }
+  header h1 { font-size: 18px; margin: 0; }
+  main { max-width: 760px; margin: 0 auto; padding: 0 16px 48px; display: grid; gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  h2 { font-size: 14px; margin: 0 0 4px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  .hint { color: var(--muted); font-size: 14px; margin: 0; }
+  button, .btn { font: inherit; padding: 7px 14px; border-radius: 8px; cursor: pointer;
+                 border: 1px solid var(--line); background: var(--card); color: var(--text);
+                 text-decoration: none; display: inline-block; }
+  button:hover, .btn:hover { border-color: var(--muted); }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: .55; cursor: default; }
+  a { color: var(--accent); }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .spacer { flex: 1; }
+  #lists { display: grid; gap: 16px; }
+  ol.rank { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 6px; }
+  ol.rank li { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line);
+               border-radius: 8px; background: var(--bg); }
+  ol.rank li.off { opacity: .55; }
+  ol.rank li.dragging { opacity: .4; }
+  ol.rank li.over { border-color: var(--accent); }
+  .handle { cursor: grab; color: var(--muted); user-select: none; font-size: 16px; line-height: 1; touch-action: none; }
+  .num { width: 1.6em; text-align: center; color: var(--muted); font-variant-numeric: tabular-nums; }
+  li label { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0; cursor: pointer; }
+  li .move { padding: 2px 9px; line-height: 1.3; }
+  #status { min-height: 1.4em; font-size: 14px; color: var(--muted); }
+  #status.error { color: var(--danger); }
+  .tag { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Settings</h1>
+  <a class="btn" href="/">Back to the app</a>
+</header>
+
+<main>
+  <div class="card" id="intro">
+    <h2>Part preferences</h2>
+    <p class="hint">Rank the part types you'd like to use, best first. When you look up prices, the first choice is searched first. If nothing in stock matches, the next one is tried. Untick a type to never use it.</p>
+    <p class="hint" id="state" style="margin-top:8px"></p>
+  </div>
+  <div id="lists"></div>
+  <div class="row" id="actions" hidden>
+    <button class="primary" id="save">Save preferences</button>
+    <button id="reset">Clear all preferences</button>
+    <span id="status" role="status"></span>
+  </div>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const el = (tag, props = {}, ...kids) => {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === "class") n.className = v;
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else if (v !== undefined && v !== null && v !== false) n.setAttribute(k, v === true ? "" : v);
+  }
+  n.append(...kids);
+  return n;
+};
+
+let catalog = {};
+let model = {};      // category -> [{ id, label, on }]  (display order)
+let saved = null;    // what the server has
+let dirty = false;
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { credentials: "same-origin", ...opts, headers: { "Content-Type": "application/json" } });
+  let data = null;
+  try { data = await res.json(); } catch {}
+  if (!res.ok) { const e = new Error((data && data.error) || `Request failed (${res.status})`); e.status = res.status; throw e; }
+  return data;
+}
+
+const setStatus = (msg, isError = false) => { const s = $("#status"); s.textContent = msg || ""; s.className = isError ? "error" : ""; };
+const setDirty = (d) => { dirty = d; };
+window.addEventListener("beforeunload", (e) => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
+
+// Saved lists first (in saved order, ticked), then everything else unticked.
+function build(prefs) {
+  model = {};
+  for (const [cat, spec] of Object.entries(catalog)) {
+    const chosen = (prefs && prefs[cat]) || (prefs ? [] : spec.items.map((i) => i.id));
+    const byId = new Map(spec.items.map((i) => [i.id, i]));
+    const on = chosen.map((id) => ({ ...byId.get(id), on: true }));
+    const off = spec.items.filter((i) => !chosen.includes(i.id)).map((i) => ({ ...i, on: false }));
+    model[cat] = [...on, ...off];
+  }
+}
+
+const current = () => Object.fromEntries(Object.entries(model).map(([c, items]) => [c, items.filter((i) => i.on).map((i) => i.id)]));
+
+function move(cat, from, to, focusId) {
+  const list = model[cat];
+  if (to < 0 || to >= list.length || from === to) return;
+  list.splice(to, 0, ...list.splice(from, 1));
+  setDirty(true);
+  setStatus("");
+  render(focusId ? { cat, id: focusId } : null);
+}
+
+function render(focus) {
+  const box = $("#lists");
+  box.replaceChildren();
+  for (const [cat, spec] of Object.entries(catalog)) {
+    const ol = el("ol", { class: "rank", "aria-label": spec.title });
+    model[cat].forEach((item, i) => {
+      const cb = el("input", { type: "checkbox", id: `${cat}-${item.id}`, ...(item.on ? { checked: true } : {}) });
+      cb.addEventListener("change", () => { item.on = cb.checked; setDirty(true); setStatus(""); render({ cat, id: item.id, box: true }); });
+      const up = el("button", { class: "move", type: "button", "data-move": `${cat}-${item.id}-up`, "aria-label": `Move ${item.label} up`, onclick: () => move(cat, i, i - 1, `${item.id}-up`) }, "↑");
+      const down = el("button", { class: "move", type: "button", "data-move": `${cat}-${item.id}-down`, "aria-label": `Move ${item.label} down`, onclick: () => move(cat, i, i + 1, `${item.id}-down`) }, "↓");
+      if (i === 0) up.disabled = true;
+      if (i === model[cat].length - 1) down.disabled = true;
+      const li = el("li", { class: item.on ? "" : "off", draggable: "true", "data-id": item.id },
+        el("span", { class: "handle", "aria-hidden": "true", title: "Drag to reorder" }, "⋮⋮"),
+        el("span", { class: "num" }, item.on ? String(model[cat].slice(0, i + 1).filter((x) => x.on).length) : "–"),
+        el("label", {}, cb, item.label),
+        up, down);
+      li.addEventListener("dragstart", (e) => { li.classList.add("dragging"); e.dataTransfer.setData("text/plain", `${cat}:${i}`); e.dataTransfer.effectAllowed = "move"; });
+      li.addEventListener("dragend", () => li.classList.remove("dragging"));
+      li.addEventListener("dragover", (e) => { e.preventDefault(); li.classList.add("over"); });
+      li.addEventListener("dragleave", () => li.classList.remove("over"));
+      li.addEventListener("drop", (e) => {
+        e.preventDefault();
+        li.classList.remove("over");
+        const [c, from] = (e.dataTransfer.getData("text/plain") || "").split(":");
+        if (c === cat) move(cat, Number(from), i);
+      });
+      ol.append(li);
+    });
+    box.append(el("div", { class: "card" }, el("h2", {}, spec.title), el("p", { class: "hint" }, spec.help), ol));
+  }
+  if (focus) {
+    const target = focus.box ? document.getElementById(`${focus.cat}-${focus.id}`) : document.querySelector(`[data-move="${focus.cat}-${focus.id}"]`);
+    if (target && !target.disabled) target.focus();
+    else document.querySelector(`#lists ol[aria-label="${catalog[focus.cat].title}"] button:not(:disabled)`)?.focus();
+  }
+}
+
+function describe(prefs) {
+  const parts = Object.entries(prefs || {}).map(([cat, ids]) =>
+    `${catalog[cat].title}: ${ids.map((id) => catalog[cat].items.find((i) => i.id === id).label).join(" → ")}`);
+  return parts.length ? `Saved: ${parts.join(" · ")}` : "Nothing is saved yet. Price lookups use the mounting style you pick on the main page, with generic part types.";
+}
+
+async function load() {
+  try {
+    const data = await api("/api/settings");
+    catalog = data.catalog;
+    saved = data.preferences;
+    build(saved);
+    $("#state").textContent = describe(saved);
+    $("#actions").hidden = false;
+    render();
+  } catch (e) {
+    $("#lists").replaceChildren();
+    $("#state").replaceChildren(e.status === 401
+      ? el("span", {}, "Sign in to set your preferences. ", el("a", { href: "/" }, "Go to the app"), " and use the Sign in button, then come back here.")
+      : document.createTextNode(e.message));
+  }
+}
+
+async function save(prefs) {
+  const b = $("#save"), r = $("#reset");
+  b.disabled = r.disabled = true;
+  setStatus("Saving…");
+  try {
+    const data = await api("/api/settings", { method: "PUT", body: JSON.stringify({ preferences: prefs }) });
+    saved = data.preferences;
+    build(saved || null);
+    setDirty(false);
+    $("#state").textContent = describe(saved);
+    render();
+    setStatus("Saved.");
+  } catch (e) {
+    setStatus(e.message, true);
+  } finally {
+    b.disabled = r.disabled = false;
+  }
+}
+
+$("#save").addEventListener("click", () => save(current()));
+$("#reset").addEventListener("click", () => save({}));
+load();
+</script>
+</body>
+</html>

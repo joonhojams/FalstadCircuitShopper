@@ -8,6 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import worker from "../src/index.js";
 import { SAMPLE } from "./parser.test.mjs";
 import "./pricing.test.mjs";
+import "./networks.test.mjs";
 import { ORDERS, SALES } from "./orders.test.mjs";
 
 const schema = readFileSync(new URL("../schema.sql", import.meta.url), "utf8");
@@ -57,7 +58,7 @@ async function seedUser(id, token) {
   assert.equal(r.data, "static-file", "non-API paths fall through to static assets");
 
   const me = await call("/api/me");
-  assert.deepEqual(me.data, { authConfigured: false, methods: { google: false, email: true, digikey: false }, pricing: false, orders: { configured: false, connected: false }, user: null });
+  assert.deepEqual(me.data, { authConfigured: false, methods: { google: false, email: true, digikey: false }, pricing: false, orders: { configured: false, connected: false }, hasPreferences: false, user: null });
 
   const bom = await call("/api/bom", { method: "POST", body: { text: SAMPLE } });
   assert.equal(bom.status, 200);
@@ -753,6 +754,176 @@ const bob = await seedUser("bob", "bob-token");
   // sign out
   await call("/auth/logout", { method: "POST", cookie: `sid=${sid2}`, e });
   assert.equal((await call("/api/me", { cookie: `sid=${sid2}`, e })).data.user, null);
+}
+
+// ---- common-value alternatives ----
+{
+  const circuit = `$ 1 0.000005 10.2 50 5 50 5e-11
+r 0 0 64 0 0 4990
+r 64 0 128 0 0 4990
+r 128 0 192 0 0 1000
+c 0 64 64 64 0 6.5e-8 0 0.001
+c 0 128 64 128 0 0.000001 0
+v 0 0 0 64 0 0 40 5 0 0 0.5
+`;
+  const post = (body) => call("/api/networks", { method: "POST", body });
+  const ok = await post({ text: circuit });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(ok.data.items.map((i) => i.value).sort(), ["4.99 kΩ", "65 nF"]);
+  const res = ok.data.items.find((i) => i.value === "4.99 kΩ");
+  assert.equal(res.quantity, 2);
+  assert.equal(res.options[0].totalParts, 4);
+  assert.equal(ok.data.standardCount, 2);
+  // no login needed, and nothing is saved
+  assert.equal((await env.DB.prepare("SELECT COUNT(*) AS n FROM queries WHERE title LIKE '%networks%'").first()).n, 0);
+  // settings
+  const fine = await post({ text: circuit, resistorSeries: "E96", capacitorSeries: "E24", tolerance: 0.5 });
+  assert.deepEqual(fine.data.items.map((i) => i.value), ["65 nF"]);
+  assert.equal(fine.data.settings.tolerance, 0.5);
+  // validation
+  assert.equal((await post({ text: circuit, resistorSeries: "E3" })).status, 400);
+  assert.equal((await post({ text: circuit, tolerance: 50 })).status, 400);
+  assert.equal((await post({ text: circuit, tolerance: "abc" })).status, 400);
+  assert.equal((await post({ text: "" })).status, 400);
+  assert.equal((await post({ text: "not a circuit" })).status, 422);
+  assert.equal((await post({ text: "x".repeat(2_000_000) })).status, 413);
+  assert.equal((await call("/api/networks", { method: "POST", body: undefined })).status, 400);
+  assert.equal((await call("/api/networks")).status, 404, "GET is not a route");
+  assert.equal((await call("/api/networks", { method: "POST", body: { text: circuit }, headers: { Origin: "https://evil.example" } })).status, 403);
+}
+
+// ---- ranked part-type preferences ----
+{
+  const dkEnv = { ...env, DIGIKEY_CLIENT_ID: "dk-id", DIGIKEY_CLIENT_SECRET: "dk-secret" };
+  const put = (cookie, preferences, extra = {}) => call("/api/settings", { method: "PUT", cookie, body: { preferences }, e: dkEnv, ...extra });
+  const getS = (cookie) => call("/api/settings", { cookie, e: dkEnv });
+  const pat = await seedUser("pat", "pat-token");
+  const quinn = await seedUser("quinn", "quinn-token");
+
+  // access
+  assert.equal((await call("/api/settings", { e: dkEnv })).status, 401);
+  assert.equal((await call("/api/settings", { method: "PUT", body: { preferences: {} }, e: dkEnv })).status, 401);
+  assert.equal((await call("/api/settings", { method: "DELETE", cookie: pat, e: dkEnv })).status, 405);
+
+  // nothing saved yet: no preferences, and the catalog the page needs to draw its lists
+  const empty = await getS(pat);
+  assert.equal(empty.status, 200);
+  assert.equal(empty.data.preferences, null);
+  assert.deepEqual(Object.keys(empty.data.catalog), ["mounting", "capacitor", "resistor"]);
+  assert.deepEqual(empty.data.catalog.mounting.items.map((i) => i.id), ["smd", "tht"]);
+  assert.equal((await call("/api/me", { cookie: pat, e: dkEnv })).data.hasPreferences, false);
+
+  // validation
+  assert.equal((await put(pat, "nope")).status, 400);
+  assert.equal((await put(pat, [])).status, 400);
+  assert.equal((await put(pat, { colour: ["red"] })).status, 400);
+  assert.equal((await put(pat, { mounting: "smd" })).status, 400);
+  assert.equal((await put(pat, { mounting: ["smd", "dip"] })).status, 400);
+  assert.equal((await put(pat, { mounting: ["smd", "smd"] })).status, 400);
+  assert.equal((await put(pat, { capacitor: ["ceramic", 7] })).status, 400);
+  assert.equal((await call("/api/settings", { method: "PUT", cookie: pat, e: dkEnv, body: "not json" })).status, 400);
+  assert.equal((await put(pat, { mounting: ["smd"] }, { headers: { Origin: "https://evil.example" } })).status, 403);
+  assert.equal((await getS(pat)).data.preferences, null, "failed saves change nothing");
+
+  // save, read back, per-user
+  const saved = await put(pat, { mounting: ["smd", "tht"], capacitor: ["aluminum", "ceramic"], resistor: [] });
+  assert.equal(saved.status, 200);
+  assert.deepEqual(saved.data.preferences, { mounting: ["smd", "tht"], capacitor: ["aluminum", "ceramic"] }, "empty lists are dropped");
+  assert.deepEqual((await getS(pat)).data.preferences, saved.data.preferences);
+  assert.equal((await call("/api/me", { cookie: pat, e: dkEnv })).data.hasPreferences, true);
+  assert.equal((await getS(quinn)).data.preferences, null, "other users are unaffected");
+  assert.equal((await put(pat, { mounting: ["tht"], capacitor: ["aluminum", "ceramic"] })).data.preferences.mounting[0], "tht", "saving again replaces");
+  await put(pat, { mounting: ["smd", "tht"], capacitor: ["aluminum", "ceramic"] });
+
+  // ---- price lookups follow the ranking ----
+  const mk = (mpn) => ({
+    ManufacturerProductNumber: mpn, Manufacturer: { Name: "Acme" }, Description: { ProductDescription: mpn },
+    ProductUrl: `https://www.digikey.com/p/${mpn}`, QuantityAvailable: 5000,
+    ProductVariations: [{ DigiKeyProductNumber: `${mpn}-ND`, PackageType: { Name: "Cut Tape (CT)" }, MinimumOrderQuantity: 1,
+      QuantityAvailableforPackageType: 5000, StandardPricing: [{ BreakQuantity: 1, UnitPrice: 0.1 }] }],
+  });
+  const realFetch = globalThis.fetch;
+  const searches = [];
+  let empties = []; // searches containing any of these words find nothing
+  globalThis.fetch = async (url, opts) => {
+    url = String(url);
+    if (url === "https://api.digikey.com/v1/oauth2/token") return Response.json({ access_token: "tok", expires_in: 599 });
+    if (url === "https://api.digikey.com/products/v4/search/keyword") {
+      const kw = JSON.parse(opts.body).Keywords;
+      searches.push(kw);
+      return Response.json({ Products: empties.some((w) => kw.includes(w)) ? [] : [mk("P-" + kw.replace(/\W+/g, "").slice(0, 12))] });
+    }
+    throw new Error("unexpected fetch " + url);
+  };
+  const price = (cookie, items, extra = {}) => call("/api/pricing", { method: "POST", cookie, e: dkEnv, body: { items, ...extra } });
+  const cap = (value, query) => ({ component: "Capacitor", value, details: "", quantity: 2, ...(query ? { query } : {}) });
+
+  try {
+    // first choice has stock: one search only, and it is the top-ranked type in the top-ranked mounting style
+    let r = await price(pat, [cap("10 µF")], { package: "pref" });
+    assert.deepEqual(searches, ["CAP ALUM 10UF 25V SMD"]);
+    assert.equal(r.data.results[0].query, "CAP ALUM 10UF 25V SMD");
+    assert.equal(r.data.results[0].fellBack, undefined);
+
+    // nothing matches the first choice: fall back to the next type, with an explanation
+    searches.length = 0; empties = ["ALUM"];
+    r = await price(pat, [cap("22 µF")], { package: "pref" });
+    assert.deepEqual(searches, ["CAP ALUM 22UF 25V SMD", "CAP CER 22UF 25V 0805"]);
+    assert.equal(r.data.results[0].query, "CAP CER 22UF 25V 0805");
+    assert.equal(r.data.results[0].fellBack, true);
+    assert.match(r.data.results[0].note, /Nothing matched "CAP ALUM 22UF 25V SMD"/);
+    assert.equal(r.data.results[0].options.length, 1);
+
+    // types you left out are never searched; mounting falls back after types; at most 3 searches per line
+    searches.length = 0; empties = ["ALUM", "CER"];
+    r = await price(pat, [cap("33 µF")], { package: "pref" });
+    assert.deepEqual(searches, ["CAP ALUM 33UF 25V SMD", "CAP CER 33UF 25V 0805", "CAP ALUM 33UF 25V RADIAL"]);
+    assert.ok(searches.every((q) => !/FILM|TANT/.test(q)));
+    assert.deepEqual(r.data.results[0].options, [], "still nothing: shown as no match, not an error");
+    assert.equal(r.data.results[0].error, undefined);
+
+    // an explicit mounting choice overrides the ranking's mounting, but type preferences still apply
+    searches.length = 0; empties = [];
+    await price(pat, [cap("47 µF")], { package: "tht" });
+    assert.deepEqual(searches, ["CAP ALUM 47UF 25V RADIAL"]);
+
+    // results are cached per search, so repeating the lookup spends nothing
+    searches.length = 0;
+    await price(pat, [cap("47 µF")], { package: "tht" });
+    assert.deepEqual(searches, []);
+
+    // a typed-in search is never rewritten or retried
+    searches.length = 0; empties = ["MYSEARCH"];
+    r = await price(pat, [cap("10 µF", "mysearch 1")], { package: "pref" });
+    assert.deepEqual(searches, ["mysearch 1"]);
+
+    // someone with no saved preferences gets the old behaviour, even with "pref" selected
+    searches.length = 0; empties = [];
+    await price(quinn, [{ component: "Resistor", value: "12 kΩ", quantity: 1 }, cap("10 µF")], { package: "pref" });
+    assert.deepEqual(searches.sort(), ["CAP ALUM 10UF 25V RADIAL", "RES 12K OHM 1/4W AXIAL"], "through-hole, generic types");
+
+    // resistor types
+    await put(quinn, { mounting: ["tht"], resistor: ["metal_film", "carbon_film"] });
+    searches.length = 0;
+    await price(quinn, [{ component: "Resistor", value: "15 kΩ", quantity: 1 }], { package: "pref" });
+    assert.deepEqual(searches, ["RES 15K OHM 1/4W AXIAL METAL FILM"]);
+
+    // parts without a type preference follow the mounting ranking (an LED is a through-hole part for quinn)
+    searches.length = 0;
+    await price(quinn, [{ component: "LED", value: "", quantity: 1 }], { package: "pref" });
+    assert.deepEqual(searches, ["LED 5MM THROUGH HOLE"]);
+
+    // clearing everything removes the saved row
+    assert.equal((await put(quinn, {})).data.preferences, null);
+    assert.equal((await env.DB.prepare("SELECT COUNT(*) AS n FROM user_settings WHERE user_id = 'quinn'").first()).n, 0);
+    assert.equal((await call("/api/me", { cookie: quinn, e: dkEnv })).data.hasPreferences, false);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  // a deleted user takes their settings with them
+  await env.DB.prepare("DELETE FROM users WHERE id = 'pat'").run();
+  assert.equal((await env.DB.prepare("SELECT COUNT(*) AS n FROM user_settings WHERE user_id = 'pat'").first()).n, 0);
 }
 
 console.log("api tests passed");

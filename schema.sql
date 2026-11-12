@@ -77,3 +77,10 @@ CREATE TABLE IF NOT EXISTS auth_throttle (
   count    INTEGER NOT NULL,
   reset_at INTEGER NOT NULL              -- epoch ms
 );
+
+-- Per-user preferences (ranked part-type choices), stored as JSON validated by src/preferences.js.
+CREATE TABLE IF NOT EXISTS user_settings (
+  user_id     TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  preferences TEXT NOT NULL,             -- JSON: { "mounting": ["smd","tht"], "capacitor": [...], ... }
+  updated_at  INTEGER NOT NULL           -- epoch ms
+);
