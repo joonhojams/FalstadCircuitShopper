@@ -202,7 +202,12 @@ Signed-in users get a "Cheapest parts" card under the BOM. **Find cheapest** sea
 
 - Each purchasable BOM line becomes one DigiKey keyword search (`src/queries.js`), for example `10 kΩ` becomes `RES 10K OHM 1/4W AXIAL`. Supply rails and voltage/current sources are skipped. Parts the circuit doesn't identify (op-amps, generic transistors, LEDs...) get a common stand-in (LM358, 2N3904...) and are tagged **assumed**. Capacitor voltage ratings are assumed too.
 - The search is a guess from the circuit alone, since the BOM has no package, tolerance, voltage rating or part number. Every search can be edited in the page; press Enter to re-check that line. Your edits are kept if you press Find cheapest again.
-- Controls: number of boards (multiplies quantities), through-hole / surface-mount / any, and in-stock only.
+- Controls: number of boards (multiplies quantities), through-hole / surface-mount / any (or your saved preferences), and four filters:
+  - **In stock only** (on by default): only parts with enough stock for the order.
+  - **Usually stocking only** (off): only parts DigiKey flags as normally stocked, as opposed to special-order or occasionally stocked parts.
+  - **Include tariffed** (on): untick to leave out parts DigiKey flags as having an active tariff. Tariffed parts are tagged "tariffed" in the part details either way.
+  - **Include marketplace items** (off): tick to include items sold by third-party sellers through DigiKey Marketplace. They are tagged "marketplace".
+  These filters are applied to DigiKey's results using the `NormallyStocking` and `TariffActive` flags on each product, and the marketplace option controls the request's `MarketPlaceFilter`. **I couldn't check these against the live API.** If "Usually stocking only" always returns no matches, DigiKey isn't sending that flag the way this code expects. Untick it and check `NormallyStocking` in `src/pricing.js`. Each combination of filters is cached separately.
 - Results are the cheapest among DigiKey's top 30 keyword matches for each search, not a guaranteed global minimum. If buying slightly more drops into a cheaper price break and lowers the total, the page says so.
 - Prices are DigiKey list prices in USD (US site).
 

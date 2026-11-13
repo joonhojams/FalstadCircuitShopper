@@ -833,6 +833,69 @@ const bob = await seedUser("bob", "bob-token");
   }
 }
 
+// ---- stock / tariff / marketplace filters ----
+{
+  const dkEnv = { ...env, DIGIKEY_CLIENT_ID: "dk-id", DIGIKEY_CLIENT_SECRET: "dk-secret" };
+  const sam = await seedUser("sam-f", "sam-f-token");
+  const mk = (mpn, unit, extra = {}) => ({
+    ManufacturerProductNumber: mpn, Manufacturer: { Name: "Acme" }, Description: { ProductDescription: mpn },
+    ProductUrl: `https://www.digikey.com/p/${mpn}`, QuantityAvailable: 5000, ...extra,
+    ProductVariations: [{ DigiKeyProductNumber: `${mpn}-ND`, PackageType: { Name: "Bulk" }, MinimumOrderQuantity: 1,
+      QuantityAvailableforPackageType: 5000, StandardPricing: [{ BreakQuantity: 1, UnitPrice: unit }] }],
+  });
+  const realFetch = globalThis.fetch;
+  const bodies = [];
+  globalThis.fetch = async (url, opts) => {
+    url = String(url);
+    if (url === "https://api.digikey.com/v1/oauth2/token") return Response.json({ access_token: "tok", expires_in: 599 });
+    if (url === "https://api.digikey.com/products/v4/search/keyword") {
+      bodies.push(JSON.parse(opts.body));
+      return Response.json({ Products: [
+        mk("TAR", 0.01, { TariffActive: true, NormallyStocking: true }),
+        mk("OK", 0.02, { TariffActive: false, NormallyStocking: true }),
+        mk("ODD", 0.03, { TariffActive: false, NormallyStocking: false }),
+      ] });
+    }
+    throw new Error("unexpected fetch " + url);
+  };
+  const look = (value, extra = {}) => call("/api/pricing", { method: "POST", cookie: sam, e: dkEnv,
+    body: { items: [{ component: "Resistor", value, quantity: 1 }], package: "tht", ...extra } });
+  const mpns = (r) => r.data.results[0].options.map((o) => o.mpn);
+
+  try {
+    // defaults: tariffed parts included, marketplace excluded, no "usually stocking" restriction
+    let r = await look("5.6 kΩ");
+    assert.deepEqual(mpns(r), ["TAR", "OK", "ODD"]);
+    assert.equal(bodies.at(-1).FilterOptionsRequest.MarketPlaceFilter, "ExcludeMarketPlace");
+    assert.equal(r.data.results[0].options[0].tariffed, true);
+
+    // each option changes the result; they are cached separately, so each is a new search
+    const n = bodies.length;
+    r = await look("5.6 kΩ", { tariffed: false });
+    assert.deepEqual(mpns(r), ["OK", "ODD"]);
+    r = await look("5.6 kΩ", { normallyStocking: true });
+    assert.deepEqual(mpns(r), ["TAR", "OK"]);
+    r = await look("5.6 kΩ", { normallyStocking: true, tariffed: false });
+    assert.deepEqual(mpns(r), ["OK"]);
+    assert.equal(bodies.length, n + 3, "different filters are different searches");
+    r = await look("5.6 kΩ", { normallyStocking: true, tariffed: false });
+    assert.equal(bodies.length, n + 3, "same filters again: cached");
+
+    // marketplace: the exclusion filter is left out of the request
+    r = await look("5.6 kΩ", { marketplace: true });
+    assert.equal(bodies.at(-1).FilterOptionsRequest.MarketPlaceFilter, undefined);
+    assert.equal(bodies.length, n + 4);
+    r = await look("5.6 kΩ", { marketplace: false });
+    assert.equal(bodies.length, n + 4, "back to the default: cached");
+    // non-boolean junk is ignored (defaults apply)
+    r = await look("5.6 kΩ", { marketplace: "yes", normallyStocking: "yes", tariffed: "no" });
+    assert.deepEqual(mpns(r), ["TAR", "OK", "ODD"]);
+    assert.equal(bodies.length, n + 4);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
 // ---- common-value alternatives ----
 {
   const circuit = `$ 1 0.000005 10.2 50 5 50 5e-11

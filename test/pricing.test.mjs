@@ -101,4 +101,31 @@ assert.deepEqual(cheapestOptions([], 4), []);
 assert.deepEqual(cheapestOptions(undefined, 4), []);
 assert.deepEqual(cheapestOptions([{ ManufacturerProductNumber: "X" }], 4), []);
 
+// ---- tariff / usually-stocking / marketplace flags ----
+{
+  const mk = (mpn, unit, extra = {}, varExtra = {}) => ({
+    ManufacturerProductNumber: mpn, Manufacturer: { Name: "Acme" }, QuantityAvailable: 5000,
+    ProductVariations: [{ DigiKeyProductNumber: `${mpn}-ND`, MinimumOrderQuantity: 1, QuantityAvailableforPackageType: 5000,
+      StandardPricing: [{ BreakQuantity: 1, UnitPrice: unit }], ...varExtra }],
+    ...extra,
+  });
+  const products = [
+    mk("TARIFF", 0.01, { TariffActive: true, NormallyStocking: true }),
+    mk("NORMAL", 0.02, { TariffActive: false, NormallyStocking: true }),
+    mk("SPECIAL", 0.03, { TariffActive: false, NormallyStocking: false }),
+    mk("UNKNOWN", 0.04),
+    mk("MARKET", 0.05, { TariffActive: false, NormallyStocking: true }, { MarketPlace: true }),
+  ];
+  const mpns = (o) => o.map((x) => x.mpn);
+  assert.deepEqual(mpns(cheapestOptions(products, 1, { max: 10 })), ["TARIFF", "NORMAL", "SPECIAL", "UNKNOWN", "MARKET"], "no filters: everything");
+  assert.deepEqual(mpns(cheapestOptions(products, 1, { max: 10, excludeTariffed: true })), ["NORMAL", "SPECIAL", "UNKNOWN", "MARKET"]);
+  assert.deepEqual(mpns(cheapestOptions(products, 1, { max: 10, normallyOnly: true })), ["TARIFF", "NORMAL", "MARKET"], "only parts flagged as normally stocked");
+  assert.deepEqual(mpns(cheapestOptions(products, 1, { max: 10, normallyOnly: true, excludeTariffed: true })), ["NORMAL", "MARKET"]);
+  const all = cheapestOptions(products, 1, { max: 10 });
+  assert.deepEqual(all.map((o) => [o.tariffed, o.normallyStocking, o.marketplace]), [
+    [true, true, false], [false, true, false], [false, false, false], [false, false, false], [false, true, true]]);
+  // filters apply before the cap, so a few tariffed parts can't crowd out the rest
+  assert.deepEqual(mpns(cheapestOptions(products, 1, { max: 1, excludeTariffed: true })), ["NORMAL"]);
+}
+
 console.log("pricing tests passed");
