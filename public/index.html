@@ -200,7 +200,7 @@
         </div>
         <p class="warn">DigiKey list prices in USD, for the quantity you need (price breaks and minimum orders included).
           Searches are guesses from the circuit alone: it has no package, tolerance, voltage rating or part number.
-          Parts tagged “assumed” are generic stand-ins. “Next choice” means nothing in stock matched a higher-ranked type from your settings. Edit any search and press Enter to re-check that line. The cheapest option is picked
+          Parts tagged “assumed” are generic stand-ins. “Next choice” means nothing acceptable matched a higher-ranked type from your settings. With a brand ranking saved, the top pick is the cheapest option from your most-preferred brand group, not necessarily the cheapest overall. Edit any search and press Enter to re-check that line. The cheapest option is picked
           from DigiKey's top matches, so always confirm the part before ordering.</p>
       </div>
     </div>
@@ -615,7 +615,8 @@ const partLink = (o) => {
   const href = safeUrl(o.url);
   return href ? el("a", { href, target: "_blank", rel: "noopener noreferrer" }, label) : el("span", {}, label);
 };
-const partMeta = (o) => [o.dkpn, o.packaging, o.manufacturer].filter(Boolean).join(" · ");
+const TIER_NAME = { premium: "premium brand", standard: "standard brand", budget: "budget brand" };
+const partMeta = (o) => [o.dkpn, o.packaging, o.manufacturer, TIER_NAME[o.tier]].filter(Boolean).join(" · ");
 
 function altRow(options) {
   return el("tr", { class: "alt", hidden: true },
@@ -681,7 +682,7 @@ function renderPricing() {
     tbody);
   $("#pricing-foot").hidden = false;
   $("#pricing-total").textContent =
-    `Cheapest total: ${money(total)} for ${priced} of ${buyable} purchasable lines.`;
+    `Total of the top pick for each line: ${money(total)} for ${priced} of ${buyable} purchasable lines.`;
 }
 
 async function lookupPricing(indexes, overrides = {}) {

@@ -3,6 +3,8 @@
 // lookups search the first choice and move down the list only when nothing matches.
 // Leaving a type out of a list means "never use it". An empty or missing list means no preference.
 
+import { TIERS } from "./brands.js";
+
 export const CATALOG = {
   mounting: {
     title: "Mounting style",
@@ -29,6 +31,14 @@ export const CATALOG = {
       { id: "metal_film", label: "Metal film" },
       { id: "carbon_film", label: "Carbon film" },
       { id: "thick_film", label: "Thick film (chip)" },
+    ],
+  },
+  brand: {
+    title: "Brand reputation",
+    help: "Prefer makers by general reputation instead of picking brands one by one. The cheapest option from your top-ranked group is chosen, and the next group is used only if the first has nothing in stock. Groups are a rough rule of thumb, not a guarantee.",
+    items: [
+      ...Object.entries(TIERS).map(([id, t]) => ({ id, label: `${t.label} (${t.examples})` })),
+      { id: "unrated", label: "Unrated (any maker not in the lists above)" },
     ],
   },
 };
