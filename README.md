@@ -230,6 +230,19 @@ Nothing is shared between users. Each person signs in at DigiKey and approves ac
 - **Disconnect** deletes the stored tokens here. It doesn't revoke the authorization on DigiKey's side.
 - DigiKey's rate limits and date-range rules apply. A `429` or a rejected date range is shown as a message.
 
+## CI/CD (GitHub Actions)
+
+`.github/workflows/main.yml` runs the tests on every pull request and every push to `main`. A push to `main` that passes is then deployed to Cloudflare Workers, after applying `schema.sql` to the remote database (it only uses `CREATE ... IF NOT EXISTS`, so that is safe on every deploy). You can also run it by hand from the Actions tab.
+
+**One-time setup** (repository **Settings > Secrets and variables > Actions**):
+
+1. `CLOUDFLARE_ACCOUNT_ID`: your account ID (shown in the Cloudflare dashboard sidebar, or in the `wrangler whoami` output).
+2. `CLOUDFLARE_API_TOKEN`: create one at Cloudflare **My Profile > API Tokens** from the **Edit Cloudflare Workers** template, and add **Account > D1 > Edit** so the schema step can run.
+
+The app's own secrets (Google, DigiKey, `TOKEN_ENCRYPTION_KEY`) are not touched by deploys. Set them once with `npx wrangler secret put`, and they stay on the Worker.
+
+The deploy job uses a GitHub **environment** named `production`. To require someone to approve each deploy, add required reviewers under **Settings > Environments > production**. To turn deploys off, delete the `deploy` job.
+
 ## Adding another sign-in provider
 
 Users and logins are separate tables, so a new provider doesn't require a migration:

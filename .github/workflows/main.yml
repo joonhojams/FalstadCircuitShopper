@@ -1,0 +1,52 @@
+name: CI/CD
+
+# Tests run on every pull request and every push to main.
+# Pushes to main that pass the tests are then deployed to Cloudflare Workers.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: # lets you run it by hand from the Actions tab (deploys only when run on main)
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Never cancel a deploy half way through; cancel superseded test runs on pull requests.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22 # the tests use node:sqlite, which needs Node 22.5 or newer
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production # optional: add required reviewers in Settings > Environments for a manual approval step
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Update the database schema and deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # schema.sql only uses CREATE ... IF NOT EXISTS, so running it on every deploy is safe.
+          preCommands: npx wrangler d1 execute circuitjs-bom --remote --file=schema.sql
+          command: deploy
