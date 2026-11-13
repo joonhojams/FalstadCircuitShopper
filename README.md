@@ -19,6 +19,7 @@ src/password.js       Email + password accounts, sign-in, rate limiting
 src/parser.js         CircuitJS export -> BOM (pure functions)
 src/queries.js        BOM line -> DigiKey search terms (heuristics)
 src/preferences.js    Ranked part-type preferences: catalog, validation, storage
+src/brands.js         Manufacturer reputation groups and brand ranking
 src/networks.js       Series/parallel alternatives for odd resistor and capacitor values
 src/pricing.js        Picks the cheapest option from DigiKey results (price breaks, MOQ, stock)
 src/digikey.js        DigiKey OAuth + keyword-search client
@@ -153,10 +154,15 @@ Signed-in users get a **Settings** page (the button in the header, or `/settings
 - **Mounting style:** surface mount (SMD), through-hole
 - **Capacitor type:** ceramic, film, aluminum electrolytic, tantalum
 - **Resistor type:** metal film, carbon film, thick film (chip)
+- **Brand reputation:** premium, standard, budget, unrated (see below)
 
 For example, SMD then through-hole, and aluminum then film then ceramic.
 
 **How the ranking is used.** In the DigiKey price lookup, **Parts** gets a **My preferences** option (selected automatically once you've saved a ranking). Each line is searched with your first choice. If nothing in stock matches, the next choice is searched, up to 3 searches per line, and the row is tagged **next choice** with an explanation. Mounting style is the main ordering: every type is tried in one mounting style before moving to the next. Picking Through-hole, Surface-mount or Any in the **Parts** menu instead overrides the mounting ranking, but your capacitor and resistor type rankings still apply. A search you type in yourself is never rewritten or retried.
+
+**Brand reputation.** Instead of ranking hundreds of manufacturers, each maker belongs to a reputation group, and you rank the groups. For example, Panasonic (premium) versus Teapo (budget). With *Premium, then Standard* saved, each line's top pick is the **cheapest option from the most-preferred group that has stock**, which is not necessarily the cheapest overall. Groups you leave out are never offered, and if nothing acceptable is in stock the lookup moves to the next choice in your ranking. The brand is shown next to each part ("premium brand"), and ranking is applied after DigiKey results are cached, so changing it costs no extra requests.
+
+The groups live in `src/brands.js`, and **they are a rough rule of thumb, not a quality guarantee**. They reflect general reputation for consistency, mostly for passives, so they will be wrong for some product lines. The lists are short on purpose: a maker that isn't listed is **unrated**, not bad. Edit the lists to match your own experience. Matching is by the start of DigiKey's manufacturer name, so `panasonic` also matches "Panasonic Electronic Components".
 
 **Limits.**
 - Preferences only guide the price lookup. They don't change the parts list or the alternatives card.

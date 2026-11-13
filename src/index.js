@@ -2,6 +2,7 @@ import { bom } from "./parser.js";
 import { login, callback, logout, getUser, authConfigured } from "./auth.js";
 import { register, signIn } from "./password.js";
 import { analyse, SERIES } from "./networks.js";
+import { applyBrandRanking } from "./brands.js";
 import { CATALOG, validatePreferences, loadPreferences, savePreferences } from "./preferences.js";
 import { candidates } from "./queries.js";
 import { cheapestOptions } from "./pricing.js";
@@ -185,6 +186,8 @@ async function handleOrder(req, env, salesOrderId) {
 
 const PRICING = {
   maxSearches: 40,              // DigiKey requests per call, fallbacks included (Workers Free allows 50 subrequests)
+  keepOptions: 12,              // options kept per search (cached), so brand ranking has choices to rank
+  showOptions: 5,               // options shown per line when a brand ranking is set (3 otherwise)
   maxTries: 3, // searches per line at most: the first choice plus up to two fallbacks from the user's ranking
   maxItems: 40,                 // BOM lines per request (also keeps us under the Workers Free subrequest cap)
   dailyLookups: 900,            // DigiKey allows 1,000 requests/day per app; keep headroom
@@ -226,6 +229,8 @@ async function handlePricing(req, env) {
     if (!first.query) return { query: "", note: first.note, needQty };
     return { candidates: options.filter((c) => c.query), idx: 0, query: first.query, assumed: Boolean(first.assumed), note: first.note ?? "", needQty };
   });
+  // What the user sees: options ranked by brand reputation if they set a ranking, each tagged with its tier.
+  const shape = (raw) => applyBrandRanking(raw, prefs.brand, prefs.brand?.length ? PRICING.showOptions : 3);
   const keyOf = (p) => `${p.query.toLowerCase()}|${p.needQty}|${inStock ? 1 : 0}`;
 
   // One pass over some lines: reuse cached results, respect the daily budget, ask DigiKey for the rest.
@@ -242,7 +247,7 @@ async function handlePricing(req, env) {
       const hit = new Map(results.map((r) => [r.cache_key, r.result]));
       for (const p of lines) {
         const h = hit.get(keyOf(p));
-        if (h) { p.options = JSON.parse(h); p.cached = true; }
+        if (h) { p.raw = JSON.parse(h); p.options = shape(p.raw); p.cached = true; }
       }
     }
 
@@ -276,7 +281,8 @@ async function handlePricing(req, env) {
         if (limited) { p.error = "DigiKey rate limit reached. Try again in a minute."; continue; }
         try {
           const products = await searchKeyword(env, p.query, { minQty: p.needQty, inStock });
-          p.options = cheapestOptions(products, p.needQty, { inStock });
+          p.raw = cheapestOptions(products, p.needQty, { inStock, max: PRICING.keepOptions });
+          p.options = shape(p.raw);
           p.fresh = true;
         } catch (e) {
           if (e instanceof DigiKeyError) {
@@ -292,7 +298,7 @@ async function handlePricing(req, env) {
     await Promise.all(Array.from({ length: Math.min(PRICING.concurrency, queue.length) }, worker));
 
     // Remember what we fetched (a few multi-row inserts, since D1 limits queries per request).
-    const rows = [...new Map(runnable.filter((p) => p.fresh).map((p) => [keyOf(p), JSON.stringify(p.options)]))];
+    const rows = [...new Map(runnable.filter((p) => p.fresh).map((p) => [keyOf(p), JSON.stringify(p.raw)]))];
     const now = Date.now();
     for (let i = 0; i < rows.length; i += 30) {
       const chunk = rows.slice(i, i + 30);
@@ -319,8 +325,8 @@ async function handlePricing(req, env) {
       p.tried = [...(p.tried ?? []), p.query];
       p.query = next.query;
       p.assumed = Boolean(next.assumed);
-      p.note = [next.note, `Nothing matched ${p.tried.map((q) => `"${q}"`).join(", ")}, so this is the next choice in your ranking.`].filter(Boolean).join(" ");
-      p.options = undefined; p.cached = undefined; p.fresh = undefined;
+      p.note = [next.note, `Nothing acceptable (in stock${prefs.brand?.length ? ", from your preferred brands" : ""}) matched ${p.tried.map((q) => `"${q}"`).join(", ")}, so this is the next choice in your ranking.`].filter(Boolean).join(" ");
+      p.options = undefined; p.raw = undefined; p.cached = undefined; p.fresh = undefined;
     }
   }
 

@@ -9,6 +9,7 @@ import worker from "../src/index.js";
 import { SAMPLE } from "./parser.test.mjs";
 import "./pricing.test.mjs";
 import "./networks.test.mjs";
+import "./brands.test.mjs";
 import { ORDERS, SALES } from "./orders.test.mjs";
 
 const schema = readFileSync(new URL("../schema.sql", import.meta.url), "utf8");
@@ -756,6 +757,82 @@ const bob = await seedUser("bob", "bob-token");
   assert.equal((await call("/api/me", { cookie: `sid=${sid2}`, e })).data.user, null);
 }
 
+// ---- brand reputation ranking ----
+{
+  const dkEnv = { ...env, DIGIKEY_CLIENT_ID: "dk-id", DIGIKEY_CLIENT_SECRET: "dk-secret" };
+  const rita = await seedUser("rita", "rita-token");
+  const put = (preferences) => call("/api/settings", { method: "PUT", cookie: rita, body: { preferences }, e: dkEnv });
+  const mk = (mpn, maker, unit) => ({
+    ManufacturerProductNumber: mpn, Manufacturer: { Name: maker }, Description: { ProductDescription: mpn },
+    ProductUrl: `https://www.digikey.com/p/${mpn}`, QuantityAvailable: 9000,
+    ProductVariations: [{ DigiKeyProductNumber: `${mpn}-ND`, PackageType: { Name: "Bulk" }, MinimumOrderQuantity: 1,
+      QuantityAvailableforPackageType: 9000, StandardPricing: [{ BreakQuantity: 1, UnitPrice: unit }] }],
+  });
+  const realFetch = globalThis.fetch;
+  const searches = [];
+  globalThis.fetch = async (url, opts) => {
+    url = String(url);
+    if (url === "https://api.digikey.com/v1/oauth2/token") return Response.json({ access_token: "tok", expires_in: 599 });
+    if (url === "https://api.digikey.com/products/v4/search/keyword") {
+      const kw = JSON.parse(opts.body).Keywords;
+      searches.push(kw);
+      const products = [mk("T1", "Teapo Electronic", 0.05), mk("A1", "Acme Parts", 0.07), mk("Y1", "Yageo", 0.09)];
+      // Panasonic only sells the axial one in this pretend catalogue
+      if (kw.includes("AXIAL")) products.push(mk("P1", "Panasonic Electronic Components", 0.2), mk("N1", "Nichicon", 0.25));
+      return Response.json({ Products: products });
+    }
+    throw new Error("unexpected fetch " + url);
+  };
+  const res = (value, extra = {}) => call("/api/pricing", { method: "POST", cookie: rita, e: dkEnv,
+    body: { items: [{ component: "Resistor", value, quantity: 10 }], ...extra } });
+  const mfrs = (r) => r.data.results[0].options.map((o) => o.manufacturer.split(" ")[0]);
+
+  try {
+    // no brand ranking: cheapest first (as before), at most 3, each tagged with its tier
+    let r = await res("1.1 kΩ", { package: "tht" });
+    assert.deepEqual(mfrs(r), ["Teapo", "Acme", "Yageo"]);
+    assert.deepEqual(r.data.results[0].options.map((o) => o.tier), ["budget", "unrated", "standard"]);
+
+    // prefer premium, then standard; Teapo and unknown makers are never offered
+    await put({ brand: ["premium", "standard"] });
+    searches.length = 0;
+    r = await res("1.1 kΩ", { package: "tht" });
+    assert.deepEqual(mfrs(r), ["Panasonic", "Nichicon", "Yageo"], "premium first, cheapest within a group");
+    assert.deepEqual(searches, [], "same search: served from the cache, brand ranking is applied afterwards");
+    assert.equal(r.data.results[0].options[0].total, 2);
+    assert.equal(r.data.results[0].fellBack, undefined);
+
+    // order matters: standard before premium, unrated allowed
+    await put({ brand: ["standard", "premium", "unrated"] });
+    r = await res("1.1 kΩ", { package: "tht" });
+    assert.deepEqual(mfrs(r), ["Yageo", "Panasonic", "Nichicon", "Acme"]);
+
+    // premium only, and this search has no premium part: next choice in the ranking is tried
+    await put({ brand: ["premium"], mounting: ["smd", "tht"] });
+    searches.length = 0;
+    r = await res("2.2 kΩ", { package: "pref" });
+    assert.equal(searches.length, 2, "first choice had no acceptable brand, so the next was searched");
+    assert.match(searches[0], /0805/);
+    assert.match(searches[1], /AXIAL/);
+    assert.equal(r.data.results[0].fellBack, true);
+    assert.match(r.data.results[0].note, /from your preferred brands/);
+    assert.deepEqual(mfrs(r), ["Panasonic", "Nichicon"]);
+
+    // nothing acceptable anywhere: no match, not an error, and no more than 3 tries
+    await put({ brand: ["budget"], mounting: ["smd", "tht"] });
+    r = await res("3.3 kΩ", { package: "pref" });
+    assert.deepEqual(mfrs(r), ["Teapo"], "budget makers allowed when the user lists them");
+    await put({ brand: ["premium"], mounting: ["smd"] });
+    searches.length = 0;
+    r = await res("4.3 kΩ", { package: "pref" });
+    assert.deepEqual(r.data.results[0].options, []);
+    assert.equal(r.data.results[0].error, undefined);
+    assert.equal(searches.length, 1);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
 // ---- common-value alternatives ----
 {
   const circuit = `$ 1 0.000005 10.2 50 5 50 5e-11
@@ -809,7 +886,8 @@ v 0 0 0 64 0 0 40 5 0 0 0.5
   const empty = await getS(pat);
   assert.equal(empty.status, 200);
   assert.equal(empty.data.preferences, null);
-  assert.deepEqual(Object.keys(empty.data.catalog), ["mounting", "capacitor", "resistor"]);
+  assert.deepEqual(Object.keys(empty.data.catalog), ["mounting", "capacitor", "resistor", "brand"]);
+  assert.deepEqual(empty.data.catalog.brand.items.map((i) => i.id), ["premium", "standard", "budget", "unrated"]);
   assert.deepEqual(empty.data.catalog.mounting.items.map((i) => i.id), ["smd", "tht"]);
   assert.equal((await call("/api/me", { cookie: pat, e: dkEnv })).data.hasPreferences, false);
 
@@ -871,7 +949,7 @@ v 0 0 0 64 0 0 40 5 0 0 0.5
     assert.deepEqual(searches, ["CAP ALUM 22UF 25V SMD", "CAP CER 22UF 25V 0805"]);
     assert.equal(r.data.results[0].query, "CAP CER 22UF 25V 0805");
     assert.equal(r.data.results[0].fellBack, true);
-    assert.match(r.data.results[0].note, /Nothing matched "CAP ALUM 22UF 25V SMD"/);
+    assert.match(r.data.results[0].note, /Nothing acceptable \(in stock\) matched "CAP ALUM 22UF 25V SMD"/);
     assert.equal(r.data.results[0].options.length, 1);
 
     // types you left out are never searched; mounting falls back after types; at most 3 searches per line
