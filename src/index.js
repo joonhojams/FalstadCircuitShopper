@@ -212,6 +212,9 @@ async function handlePricing(req, env) {
   const mode = ["tht", "smd", "any", "pref"].includes(body.package) ? body.package : "tht";
   const mounts = mode === "pref" ? (prefs.mounting?.length ? prefs.mounting : ["tht"]) : [mode];
   const inStock = body.inStock !== false;
+  const normallyOnly = body.normallyStocking === true;       // only parts DigiKey normally stocks
+  const excludeTariffed = body.tariffed === false;            // tariffed parts are included unless turned off
+  const marketplace = body.marketplace === true;              // third-party marketplace items are excluded unless turned on
   const boards = Math.min(1000, Math.max(1, Math.floor(Number(body.boards)) || 1));
   const str = (v, n) => (typeof v === "string" ? v.slice(0, n) : "");
 
@@ -231,7 +234,7 @@ async function handlePricing(req, env) {
   });
   // What the user sees: options ranked by brand reputation if they set a ranking, each tagged with its tier.
   const shape = (raw) => applyBrandRanking(raw, prefs.brand, prefs.brand?.length ? PRICING.showOptions : 3);
-  const keyOf = (p) => `${p.query.toLowerCase()}|${p.needQty}|${inStock ? 1 : 0}`;
+  const keyOf = (p) => `${p.query.toLowerCase()}|${p.needQty}|${inStock ? 1 : 0}${normallyOnly ? 1 : 0}${excludeTariffed ? 1 : 0}${marketplace ? 1 : 0}`;
 
   // One pass over some lines: reuse cached results, respect the daily budget, ask DigiKey for the rest.
   // Returns a Response only for a failure that ends the whole request.
@@ -280,8 +283,8 @@ async function handlePricing(req, env) {
       for (let p; (p = queue.shift()); ) {
         if (limited) { p.error = "DigiKey rate limit reached. Try again in a minute."; continue; }
         try {
-          const products = await searchKeyword(env, p.query, { minQty: p.needQty, inStock });
-          p.raw = cheapestOptions(products, p.needQty, { inStock, max: PRICING.keepOptions });
+          const products = await searchKeyword(env, p.query, { minQty: p.needQty, inStock, marketplace });
+          p.raw = cheapestOptions(products, p.needQty, { inStock, max: PRICING.keepOptions, excludeTariffed, normallyOnly });
           p.options = shape(p.raw);
           p.fresh = true;
         } catch (e) {

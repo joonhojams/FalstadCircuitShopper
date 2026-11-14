@@ -19,14 +19,17 @@ function priceAt(breaks, qty) {
 /**
  * @param {object[]} products  Products[] from a keyword search
  * @param {number} needQty     how many the build needs
- * @param {{inStock?: boolean, max?: number}} opts
+ * @param {{inStock?: boolean, max?: number, excludeTariffed?: boolean, normallyOnly?: boolean}} opts
+ *   excludeTariffed: drop products DigiKey flags TariffActive. normallyOnly: keep only products DigiKey flags NormallyStocking.
  * @returns options sorted cheapest-first, at most one per manufacturer part number
  */
-export function cheapestOptions(products, needQty, { inStock = true, max = 3 } = {}) {
+export function cheapestOptions(products, needQty, { inStock = true, max = 3, excludeTariffed = false, normallyOnly = false } = {}) {
   const best = new Map();
 
   for (const p of products ?? []) {
     if (p.Discontinued || p.EndOfLife) continue;
+    if (excludeTariffed && p.TariffActive === true) continue;
+    if (normallyOnly && p.NormallyStocking !== true) continue;
     const variations = Array.isArray(p.ProductVariations) && p.ProductVariations.length ? p.ProductVariations : [{}];
 
     for (const v of variations) {
@@ -67,6 +70,9 @@ export function cheapestOptions(products, needQty, { inStock = true, max = 3 } =
         url: p.ProductUrl ?? "",
         datasheet: p.DatasheetUrl ?? "",
         buyMore,
+        tariffed: p.TariffActive === true,
+        normallyStocking: p.NormallyStocking === true,
+        marketplace: v.MarketPlace === true || p.MarketPlace === true,
       };
       const key = `${option.manufacturer}|${option.mpn || option.dkpn}`;
       const prev = best.get(key);

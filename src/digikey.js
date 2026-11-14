@@ -43,8 +43,9 @@ export async function getToken(env, force = false) {
 }
 
 /** POST /products/v4/search/keyword. Returns the matching products (exact matches first). */
-export async function searchKeyword(env, keywords, { limit = 30, minQty = 0, inStock = true } = {}) {
-  const filters = { MarketPlaceFilter: "ExcludeMarketPlace" };
+export async function searchKeyword(env, keywords, { limit = 30, minQty = 0, inStock = true, marketplace = false } = {}) {
+  // Marketplace items are sold by third parties, not DigiKey. Leave the filter out to include them.
+  const filters = marketplace ? {} : { MarketPlaceFilter: "ExcludeMarketPlace" };
   if (inStock) {
     filters.SearchOptions = ["InStock"];
     if (minQty > 0) filters.MinimumQuantityAvailable = minQty;

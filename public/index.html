@@ -186,6 +186,9 @@
             </select>
           </label>
           <label><input type="checkbox" id="instock" checked> In stock only</label>
+          <label title="Only parts DigiKey normally keeps in stock"><input type="checkbox" id="normally"> Usually stocking only</label>
+          <label title="Uncheck to leave out parts DigiKey flags as having an active tariff"><input type="checkbox" id="tariffed" checked> Include tariffed</label>
+          <label title="Items sold by third-party sellers through DigiKey Marketplace"><input type="checkbox" id="market"> Include marketplace items</label>
           <span class="spacer"></span>
           <button id="price-go" class="primary">Find cheapest</button>
         </div>
@@ -616,7 +619,7 @@ const partLink = (o) => {
   return href ? el("a", { href, target: "_blank", rel: "noopener noreferrer" }, label) : el("span", {}, label);
 };
 const TIER_NAME = { premium: "premium brand", standard: "standard brand", budget: "budget brand" };
-const partMeta = (o) => [o.dkpn, o.packaging, o.manufacturer, TIER_NAME[o.tier]].filter(Boolean).join(" · ");
+const partMeta = (o) => [o.dkpn, o.packaging, o.manufacturer, TIER_NAME[o.tier], o.tariffed && "tariffed", o.marketplace && "marketplace"].filter(Boolean).join(" · ");
 
 function altRow(options) {
   return el("tr", { class: "alt", hidden: true },
@@ -702,7 +705,8 @@ async function lookupPricing(indexes, overrides = {}) {
   try {
     const data = await api("/api/pricing", {
       method: "POST",
-      body: JSON.stringify({ items, package: $("#pkg").value, inStock: $("#instock").checked, boards }),
+      body: JSON.stringify({ items, package: $("#pkg").value, inStock: $("#instock").checked,
+        normallyStocking: $("#normally").checked, tariffed: $("#tariffed").checked, marketplace: $("#market").checked, boards }),
     });
     if (!pricing) pricing = new Array(current.summary.length).fill(null);
     data.results.forEach((r, k) => { pricing[indexes[k]] = r; });
