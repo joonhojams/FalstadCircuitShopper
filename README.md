@@ -142,7 +142,7 @@ Then add the deployed URL's `/auth/callback` to the Google client's redirect URI
 | Method | Path | Auth | Description |
 | --- | --- | --- | --- |
 | `POST` | `/api/bom` | optional | Body `{ text, title?, save? }`. Returns `{ count, summary, parts, unknown, id, saved }`. Saves to history when signed in (unless `save: false`). |
-| `GET` / `PUT` | `/api/settings` | yes | Read or save the user's ranked part-type preferences |
+| `GET` / `PUT` | `/api/settings` | yes | Read or save the user's ranked part-type preferences and saved pricing filters |
 | `POST` | `/api/networks` | no | Series/parallel alternatives for non-standard resistor and capacitor values. Body: `{ text, resistorSeries?, capacitorSeries?, tolerance? }` |
 | `POST` | `/api/pricing` | yes | Body `{ items: [{ component, value, details, quantity, query? }], package?, inStock?, boards? }`. Returns the cheapest DigiKey options per line. See below. |
 | `GET` | `/api/orders` | yes | The signed-in user's own DigiKey orders. Query: `start`, `end` (YYYY-MM-DD, default last 30 days), `page`, `pageSize` (max 25), `shared`. `409` with `notConnected: true` if they haven't connected DigiKey. |
@@ -186,7 +186,9 @@ The groups live in `src/brands.js`, and **they are a rough rule of thumb, not a 
 - Fallbacks cost DigiKey requests. A single lookup makes at most 40 searches in total, fallbacks included.
 - Preferences are stored per user in the `user_settings` table. Run `npm run db:init:remote` (and `db:init:local`) once after updating. Until then, saving shows a message asking for that.
 
-API: `GET /api/settings` returns `{ preferences, catalog }`; `PUT /api/settings` with `{ preferences: { mounting: ["smd","tht"], capacitor: ["aluminum","film","ceramic"] } }` saves. Both need sign-in. An empty list means no preference for that category.
+**Pricing filters save automatically.** For signed-in users, the DigiKey controls (In stock only, Usually stocking only, Include tariffed, Include marketplace items, and the **Parts** menu once you've picked one) are saved a moment after you change them and restored the next time you sign in. They are stored in the same `user_settings` row as the rankings, under a `filters` key, so saving one never overwrites the other and no database change is needed. Signed-out use is unchanged and nothing is stored.
+
+API: `GET /api/settings` returns `{ preferences, filters, catalog }`; `PUT /api/settings` with `{ preferences: { mounting: ["smd","tht"], capacitor: ["aluminum","film","ceramic"] } }` and/or `{ filters: { inStock: true, tariffed: false, package: "smd" } }` saves (anything you leave out is unchanged; filters merge over the saved ones). Both need sign-in. An empty list means no preference for that category.
 
 ## Common-value alternatives
 

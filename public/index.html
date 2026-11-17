@@ -194,6 +194,7 @@
           <label title="Only parts DigiKey normally keeps in stock"><input type="checkbox" id="normally"> Usually stocking only</label>
           <label title="Uncheck to leave out parts DigiKey flags as having an active tariff"><input type="checkbox" id="tariffed" checked> Include tariffed</label>
           <label title="Items sold by third-party sellers through DigiKey Marketplace"><input type="checkbox" id="market"> Include marketplace items</label>
+          <span id="filters-saved" class="hint" role="status"></span>
           <span class="spacer"></span>
           <button id="price-go" class="primary">Find cheapest</button>
         </div>
@@ -687,11 +688,53 @@ function setPStatus(msg, isError = false, busy = false) {
 let pkgTouched = false;
 $("#pkg").addEventListener("change", () => { pkgTouched = true; });
 
+// Pricing filters follow the signed-in user: restored when the page loads, saved when changed.
+const FILTER_BOXES = { inStock: "#instock", normallyStocking: "#normally", tariffed: "#tariffed", marketplace: "#market" };
+let filtersAppliedFor = null;
+function applySavedFilters() {
+  if (!me.user) { filtersAppliedFor = null; return; }
+  const who = me.user.email || me.user.name || "user";
+  if (filtersAppliedFor === who) return;
+  filtersAppliedFor = who;
+  for (const [key, sel] of Object.entries(FILTER_BOXES)) {
+    if (me.filters && typeof me.filters[key] === "boolean") $(sel).checked = me.filters[key];
+  }
+}
+
+let filterSaveTimer = null, filterNoteTimer = null;
+function saveFilters() {
+  if (!me.user) return; // signed-out users just use the controls; nothing is stored
+  clearTimeout(filterSaveTimer);
+  filterSaveTimer = setTimeout(async () => {
+    const filters = {};
+    for (const [key, sel] of Object.entries(FILTER_BOXES)) filters[key] = $(sel).checked;
+    if (pkgTouched) filters.package = $("#pkg").value; // only once the user has actually chosen one
+    const note = $("#filters-saved");
+    try {
+      const data = await api("/api/settings", { method: "PUT", body: JSON.stringify({ filters }) });
+      me.filters = data.filters;
+      paint(note, "Saved to your preferences");
+      note.className = "hint";
+    } catch (e) {
+      paint(note, `Couldn't save: ${e.message}`);
+      note.className = "error";
+    }
+    clearTimeout(filterNoteTimer);
+    filterNoteTimer = setTimeout(() => paint(note, ""), 3000);
+  }, 400);
+}
+for (const sel of [...Object.values(FILTER_BOXES), "#pkg"]) $(sel).addEventListener("change", saveFilters);
+
 function updatePricingGate() {
   const ok = Boolean(me.user && me.pricing);
+  applySavedFilters();
   // "My preferences" appears once the user has saved a ranking, and is the default until they pick another.
   $("#pkg option[value=pref]").hidden = !me.hasPreferences;
-  if (me.hasPreferences && !pkgTouched) $("#pkg").value = "pref";
+  if (!pkgTouched) {
+    const want = me.filters && me.filters.package;
+    if (want && (want !== "pref" || me.hasPreferences)) $("#pkg").value = want;
+    else if (me.hasPreferences) $("#pkg").value = "pref";
+  }
   if (!me.hasPreferences && $("#pkg").value === "pref") $("#pkg").value = "tht";
   $("#pricing-controls").hidden = !ok;
   const msg = $("#pricing-msg");
