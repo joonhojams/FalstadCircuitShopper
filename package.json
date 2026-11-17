@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "test": "node --disable-warning=ExperimentalWarning test/api.test.mjs",
+    "test": "node --disable-warning=ExperimentalWarning --test \"test/*.test.mjs\"",
     "db:init:local": "wrangler d1 execute circuitjs-bom --local --file=schema.sql",
     "db:init:remote": "wrangler d1 execute circuitjs-bom --remote --file=schema.sql"
   },

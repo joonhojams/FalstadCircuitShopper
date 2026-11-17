@@ -221,6 +221,19 @@
       <div id="net-out"></div>
     </div>
 
+    <div class="card" id="kicad" hidden>
+      <h2>PCB (KiCad 9)</h2>
+      <p class="hint">Creates a KiCad project with a schematic ready for layout. You choose the ICs for the op-amps, every DC rail of the same voltage is joined into one net, and a single power connector brings in all the supplies. You then place and route the board in KiCad (Update PCB from Schematic), and order from there.</p>
+      <div class="row">
+        <label>Parts <select id="kc-mount"><option value="smd">Surface-mount</option><option value="tht">Through-hole</option></select></label>
+        <label><input type="checkbox" id="kc-decouple" checked> 100 nF decoupling cap per IC</label>
+        <button id="kc-go">Check circuit</button>
+      </div>
+      <div id="kc-status" class="hint" style="margin-top:8px"></div>
+      <div id="kc-out"></div>
+      <div class="row" id="kc-dl-row" hidden><button class="primary" id="kc-dl">Download KiCad project (.zip)</button></div>
+    </div>
+
     <div class="card" id="orders" hidden>
       <div class="row" style="margin-top:0">
         <h2 style="margin:0">DigiKey orders</h2>
@@ -506,6 +519,70 @@ $("#net-go").addEventListener("click", async () => {
   } finally { b.disabled = false; }
 });
 
+// ---------- KiCad export ----------
+let kcPicks = {};
+const kcBody = (download) => ({
+  text: $("#input").value, mounting: $("#kc-mount").value, decouple: $("#kc-decouple").checked,
+  ics: kcPicks, download, name: (document.querySelector("#result-title")?.textContent || "circuit").replace(/^Parts list\s*·?\s*/, "") || "circuit",
+});
+function resetKicad() {
+  kcPicks = {};
+  $("#kc-out").replaceChildren();
+  $("#kc-status").textContent = "";
+  $("#kc-dl-row").hidden = true;
+}
+function renderKicad(d) {
+  const box = $("#kc-out");
+  box.replaceChildren();
+  if (d.opamps.length) {
+    box.append(el("h3", { style: "font-size:14px;margin:12px 0 4px" }, "Choose an IC for each op-amp"));
+    for (const ref of d.opamps) {
+      const sel = el("select", { "data-ref": ref, onchange: () => { if (sel.value) kcPicks[ref] = sel.value; else delete kcPicks[ref]; kcCheck(); } },
+        el("option", { value: "" }, "Choose…"),
+        ...d.catalog.map((c) => el("option", { value: c.id, ...(kcPicks[ref] === c.id ? { selected: true } : {}) }, `${c.id} (${c.channels} ch) · ${c.desc}`)));
+      box.append(el("div", { class: "row", style: "margin:4px 0" }, el("strong", {}, ref), sel));
+    }
+    box.append(el("p", { class: "hint" }, "Op-amps with the same IC share packages (a dual holds two). Power pins go to the highest positive rail and ground."));
+  }
+  if (d.rails.length) box.append(el("p", { class: "hint" }, "Supply nets: " + d.rails.map((r) => `${r.net} (${r.volts} V)`).join(", ") + ", GND. All rails of the same voltage are one net, fed from one connector."));
+  else box.append(el("p", { class: "hint" }, "No DC rail found in this circuit."));
+  for (const u of d.unsupported) box.append(el("p", { class: "hint", style: "color:var(--danger)" }, `Can't be placed on a board yet: ${u.name} ×${u.count}`));
+  for (const e of d.errors) box.append(el("p", { class: "hint", style: "color:var(--danger)" }, e));
+  if (d.warnings.length) box.append(el("details", {}, el("summary", {}, `${d.warnings.length} warning(s)`), el("ul", {}, ...d.warnings.map((w) => el("li", {}, w)))));
+  if (d.summary) {
+    box.append(el("p", { class: "hint" }, `${d.summary.parts.length} board parts: ` + d.summary.parts.map((p) => p.ref).join(", ")));
+  }
+  $("#kc-dl-row").hidden = !d.summary;
+}
+async function kcCheck() {
+  const text = $("#input").value;
+  if (!text.trim()) return;
+  $("#kc-status").textContent = "Working…";
+  try {
+    renderKicad(await api("/api/kicad", { method: "POST", body: JSON.stringify(kcBody(false)) }));
+    $("#kc-status").textContent = "";
+  } catch (e) {
+    $("#kc-out").replaceChildren();
+    $("#kc-dl-row").hidden = true;
+    $("#kc-status").textContent = e.message;
+  }
+}
+$("#kc-go").addEventListener("click", kcCheck);
+$("#kc-mount").addEventListener("change", () => { if ($("#kc-out").childElementCount) kcCheck(); });
+$("#kc-decouple").addEventListener("change", () => { if ($("#kc-out").childElementCount) kcCheck(); });
+$("#kc-dl").addEventListener("click", async () => {
+  const b = $("#kc-dl");
+  b.disabled = true;
+  try {
+    const res = await fetch("/api/kicad", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(kcBody(true)) });
+    if (!res.ok) { let m = `Request failed (${res.status})`; try { m = (await res.json()).error || m; } catch {} throw new Error(m); }
+    const url = URL.createObjectURL(await res.blob());
+    const a = el("a", { href: url, download: "circuit-kicad.zip" });
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  } catch (e) { $("#kc-status").textContent = e.message; } finally { b.disabled = false; }
+});
+
 // ---------- results ----------
 function showResult(result, id = null, title = "") {
   current = result; currentId = id;
@@ -513,7 +590,9 @@ function showResult(result, id = null, title = "") {
   $("#pricing").hidden = false;
   resetPricing();
   resetNetworks();
+  resetKicad();
   $("#networks").hidden = false;
+  $("#kicad").hidden = false;
   $("#result-title").textContent = title ? `Parts list · ${title}` : "Parts list";
   const unk = Object.entries(result.unknown || {});
   const w = $("#unknown");
