@@ -1,4 +1,8 @@
 import { bom } from "./parser.js";
+import { extractNetlist } from "./netlist.js";
+import { buildProject } from "./kicad.js";
+import { icCatalog } from "./ics.js";
+import { zip } from "./zip.js";
 import { login, callback, logout, getUser, authConfigured } from "./auth.js";
 import { register, signIn } from "./password.js";
 import { analyse, SERIES } from "./networks.js";
@@ -60,6 +64,7 @@ export default {
       if (pathname === "/api/bom" && req.method === "POST") return handleBom(req, env);
       if (pathname === "/api/pricing" && req.method === "POST") return handlePricing(req, env);
       if (pathname === "/api/networks" && req.method === "POST") return handleNetworks(req);
+      if (pathname === "/api/kicad" && req.method === "POST") return handleKicad(req);
       if (pathname === "/api/settings") return handleSettings(req, env);
 
       // ----- DigiKey order history (each user connects their own DigiKey account) -----
@@ -393,6 +398,58 @@ async function handleNetworks(req) {
   if (result.count === 0) return json({ error: "No components found. Is this a CircuitJS \"Export As Text\" file?" }, 422);
   return json(analyse(result.summary, { resistorSeries, capacitorSeries, tolerance }));
 }
+
+async function handleKicad(req) {
+  let body;
+  try { body = await req.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
+  const text = typeof body?.text === "string" ? body.text : "";
+  if (!text.trim()) return json({ error: "No circuit text provided" }, 400);
+  if (text.length > MAX_TEXT) return json({ error: "Circuit is too large" }, 413);
+
+  const netlist = extractNetlist(text, { mergeRails: body.mergeRails !== false });
+  if (!netlist.parts.length) return json({ error: "No components found. Is this a CircuitJS \"Export As Text\" file?" }, 422);
+  const opts = {
+    name: typeof body.name === "string" ? body.name : "circuit",
+    mounting: body.mounting === "tht" ? "tht" : "smd",
+    ics: body.ics && typeof body.ics === "object" ? body.ics : {},
+    supply: body.supply && typeof body.supply === "object" ? body.supply : undefined,
+    decouple: body.decouple !== false,
+    ignoreUnsupported: body.ignoreUnsupported === true,
+  };
+  const built = buildProject(netlist, opts);
+  if (!body.download) {
+    // Preview: what the user must decide, and what would be built.
+    return json({
+      opamps: netlist.parts.filter((p) => p.kind === "opamp").map((p) => p.ref),
+      catalog: icCatalog(),
+      rails: netlist.rails,
+      unsupported: netlist.unsupported,
+      warnings: built.ok ? built.warnings : netlist.warnings,
+      errors: built.ok ? [] : built.errors,
+      summary: built.ok ? built.summary : null,
+    });
+  }
+  if (!built.ok) return json({ error: built.errors.join(" ") , errors: built.errors }, 422);
+  const bytes = zip({ ...built.files, "README.txt": kicadReadme(built) });
+  return new Response(bytes, { headers: {
+    "Content-Type": "application/zip",
+    "Content-Disposition": `attachment; filename="${built.summary.name}-kicad.zip"`,
+    "X-Warnings": String(built.warnings.length),
+  } });
+}
+
+const kicadReadme = (b) => `KiCad project generated from a CircuitJS circuit.
+
+1. Unzip, open ${b.summary.name}.kicad_pro in KiCad 9.
+2. Open the schematic and run Inspect > Electrical Rules Check.
+3. Open the PCB editor and choose Tools > Update PCB from Schematic (F8).
+4. Place, route, run Design Rules Check, then plot Gerbers.
+
+Nets are connected by name labels on every pin. Footprints are KiCad standard-library
+names (${b.summary.mounting === "tht" ? "through-hole" : "surface-mount"}); change them in the schematic if you want other sizes.
+Check transistor/MOSFET pinouts and IC pinouts against the datasheet of the exact parts before ordering.
+
+${b.warnings.length ? "Warnings:\n" + b.warnings.map((w) => "- " + w).join("\n") + "\n" : ""}`;
 
 async function handleBom(req, env) {
   let body;

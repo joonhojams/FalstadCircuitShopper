@@ -31,6 +31,22 @@ wrangler.jsonc        Worker, static assets, and D1 binding config
 test/                 Parser and API tests
 ```
 
+## PCB export (KiCad 9)
+
+After you generate a parts list, the **PCB (KiCad 9)** card turns the circuit into a KiCad project.
+
+1. Press **Check circuit**. Pick an IC for every op-amp (LM358, TL072, MCP6002, LM324). Op-amps that share an IC are packed into the same package, and unused channels are parked.
+2. Choose surface-mount or through-hole parts and press **Download KiCad project**.
+3. Unzip, open the `.kicad_pro` in KiCad 9, run ERC, then in the PCB editor use *Update PCB from Schematic* (F8). Place, route and order from KiCad.
+
+How it works:
+
+- Pin positions come from Falstad's own geometry (transistor and op-amp pins are computed, not stored), so nets match what you see on screen. Elements connect at coinciding points, wires, grounds and labeled nodes.
+- **All DC rails of the same voltage become one net** (for example `+5V`) and a single power connector `J1` carries every supply and ground. IC power pins go to the highest positive rail and ground, with a 100 nF decoupling capacitor per IC.
+- Nets are joined by labels on every pin rather than drawn wires; footprints are KiCad standard-library names.
+
+Limits: only resistors, capacitors, inductors, diodes, zeners, LEDs, switches, BJTs, MOSFETs and op-amps are placed. Anything else (transformers, logic gates, 555 timers, potentiometers) blocks the export so the board is never silently incomplete. Transistor and IC pinouts differ between exact parts, so check the datasheet. The generator was not run through a real KiCad install here: open the result and run ERC first.
+
 ## How to run the app
 
 You need [Node.js](https://nodejs.org/) 20 or newer. Run everything below from the project folder (the one containing `package.json`).

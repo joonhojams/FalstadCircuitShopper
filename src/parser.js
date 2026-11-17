@@ -80,7 +80,7 @@ const REF_PREFIX = {
 };
 
 // Wiring / annotation / measurement elements: not parts you would buy.
-const IGNORED = new Set(["w", "g", "o", "O", "x", "h", "p", "370", "B", "%", "?", "$"]);
+const IGNORED = new Set(["w", "g", "o", "O", "x", "h", "p", "370", "B", "207", "%", "?", "$"]);
 
 /** Accept plain export text or a share URL with the circuit percent-encoded after '#'. */
 export function loadText(raw) {
@@ -114,7 +114,7 @@ export function parse(text) {
       details = params.join(" ").slice(0, 60);
       unknown[code] = (unknown[code] ?? 0) + 1;
     }
-    parts.push({ code, name, value, details, x1, y1, x2, y2 });
+    parts.push({ code, name, value, details, x1, y1, x2, y2, flags, params });
   }
   return { parts, unknown };
 }
@@ -202,9 +202,15 @@ export function parseXml(text) {
       details = attrSummary(a);
       unknown[code] = (unknown[code] ?? 0) + 1;
     }
-    parts.push({ code, name, value, details, x1, y1, x2, y2 });
+    parts.push({ code, name, value, details, x1, y1, x2, y2, flags, attrs: a });
   }
   return { parts, unknown };
+}
+
+/** The parsed elements with their raw flags and parameters (same order as the BOM). */
+export function elements(raw) {
+  const text = loadText(raw);
+  return isXmlExport(text) ? { ...parseXml(text), xml: true, text } : { ...parse(text), xml: false, text };
 }
 
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
