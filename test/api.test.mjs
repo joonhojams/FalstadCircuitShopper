@@ -59,7 +59,7 @@ async function seedUser(id, token) {
   assert.equal(r.data, "static-file", "non-API paths fall through to static assets");
 
   const me = await call("/api/me");
-  assert.deepEqual(me.data, { authConfigured: false, methods: { google: false, email: true, digikey: false }, pricing: false, orders: { configured: false, connected: false }, hasPreferences: false, user: null });
+  assert.deepEqual(me.data, { authConfigured: false, methods: { google: false, email: true, digikey: false }, pricing: false, orders: { configured: false, connected: false }, hasPreferences: false, filters: null, user: null });
 
   const bom = await call("/api/bom", { method: "POST", body: { text: SAMPLE } });
   assert.equal(bom.status, 200);
@@ -1065,6 +1065,61 @@ v 0 0 0 64 0 0 40 5 0 0 0.5
   // a deleted user takes their settings with them
   await env.DB.prepare("DELETE FROM users WHERE id = 'pat'").run();
   assert.equal((await env.DB.prepare("SELECT COUNT(*) AS n FROM user_settings WHERE user_id = 'pat'").first()).n, 0);
+}
+
+// ---- saved pricing filters (stored alongside the ranked preferences) ----
+{
+  const dkEnv = { ...env, DIGIKEY_CLIENT_ID: "dk-id", DIGIKEY_CLIENT_SECRET: "dk-secret" };
+  const fran = await seedUser("fran", "fran-token");
+  const gus = await seedUser("gus", "gus-token");
+  const putF = (cookie, filters, extra = {}) => call("/api/settings", { method: "PUT", cookie, body: { filters }, e: dkEnv, ...extra });
+  const putP = (cookie, preferences) => call("/api/settings", { method: "PUT", cookie, body: { preferences }, e: dkEnv });
+  const getS = (cookie) => call("/api/settings", { cookie, e: dkEnv });
+  const me = async (cookie) => (await call("/api/me", { cookie, e: dkEnv })).data;
+
+  assert.equal((await putF(undefined, { inStock: true })).status, 401);
+  assert.equal((await getS(fran)).data.filters, null);
+  assert.equal((await me(fran)).filters, null);
+
+  // validation: nothing is saved by a bad request
+  assert.equal((await putF(fran, "yes")).status, 400);
+  assert.equal((await putF(fran, [])).status, 400);
+  assert.equal((await putF(fran, null)).status, 400);
+  assert.equal((await putF(fran, { inStock: "yes" })).status, 400);
+  assert.equal((await putF(fran, { colour: true })).status, 400);
+  assert.equal((await putF(fran, { package: "dip" })).status, 400);
+  assert.equal((await putF(fran, { inStock: false }, { headers: { Origin: "https://evil.example" } })).status, 403);
+  assert.equal((await call("/api/settings", { method: "PUT", cookie: fran, body: {}, e: dkEnv })).status, 400, "needs preferences or filters");
+  assert.equal((await getS(fran)).data.filters, null);
+
+  // save, read back through /api/settings and /api/me
+  const a = await putF(fran, { inStock: true, tariffed: false });
+  assert.equal(a.status, 200);
+  assert.deepEqual(a.data.filters, { inStock: true, tariffed: false });
+  assert.equal(a.data.preferences, null);
+  assert.deepEqual((await me(fran)).filters, { inStock: true, tariffed: false });
+  assert.equal((await me(fran)).hasPreferences, false, "filters alone are not part-type preferences");
+
+  // later saves merge over earlier ones
+  const b = await putF(fran, { marketplace: true, tariffed: true, package: "smd" });
+  assert.deepEqual(b.data.filters, { inStock: true, tariffed: true, marketplace: true, package: "smd" });
+
+  // rankings and filters don't overwrite each other
+  assert.deepEqual((await putP(fran, { mounting: ["smd"] })).data.filters, b.data.filters, "saving rankings keeps filters");
+  assert.deepEqual((await putF(fran, { inStock: false })).data.preferences, { mounting: ["smd"] }, "saving filters keeps rankings");
+  assert.equal((await me(fran)).hasPreferences, true);
+  const cleared = await putP(fran, {});
+  assert.equal(cleared.data.preferences, null);
+  assert.equal(cleared.data.filters.inStock, false, "clearing rankings keeps filters");
+
+  // both at once, and per-user isolation
+  const both = await call("/api/settings", { method: "PUT", cookie: gus, e: dkEnv, body: { preferences: { mounting: ["tht"] }, filters: { package: "pref" } } });
+  assert.deepEqual([both.data.preferences, both.data.filters], [{ mounting: ["tht"] }, { package: "pref" }]);
+  assert.equal((await getS(fran)).data.filters.package, "smd");
+
+  // the row goes away only when neither rankings nor filters remain
+  await putP(gus, {});
+  assert.equal((await env.DB.prepare("SELECT COUNT(*) AS n FROM user_settings WHERE user_id = 'gus'").first()).n, 1);
 }
 
 console.log("api tests passed");

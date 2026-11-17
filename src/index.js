@@ -7,7 +7,7 @@ import { login, callback, logout, getUser, authConfigured } from "./auth.js";
 import { register, signIn } from "./password.js";
 import { analyse, SERIES } from "./networks.js";
 import { applyBrandRanking } from "./brands.js";
-import { CATALOG, validatePreferences, loadPreferences, savePreferences } from "./preferences.js";
+import { CATALOG, validatePreferences, validateFilters, loadPreferences, loadStored, savePreferences, saveFilters } from "./preferences.js";
 import { candidates } from "./queries.js";
 import { cheapestOptions } from "./pricing.js";
 import { DigiKeyError, digikeyConfigured, getToken, searchKeyword } from "./digikey.js";
@@ -48,6 +48,7 @@ export default {
       // ----- API -----
       if (pathname === "/api/me" && req.method === "GET") {
         const user = await getUser(req, env);
+        const stored = user ? await loadStored(env, user.id) : null;
         return json({
           authConfigured: authConfigured(env), // Google
           methods: { google: authConfigured(env), email: true, digikey: ordersConfigured(env) },
@@ -56,7 +57,8 @@ export default {
             configured: ordersConfigured(env),
             connected: user && ordersConfigured(env) ? await isConnected(env, user.id) : false,
           },
-          hasPreferences: user ? Boolean(await loadPreferences(env, user.id)) : false,
+          hasPreferences: Boolean(stored?.preferences),
+          filters: stored?.filters ?? null, // saved pricing filters (in stock, tariffed, ...)
           user: user &&{ name: user.name, email: user.email, picture: user.picture },
         });
       }
@@ -355,7 +357,7 @@ async function handlePricing(req, env) {
   });
 }
 
-// Ranked part-type preferences (GET to read, PUT to save). Signed-in users only.
+// Ranked part-type preferences and pricing filters (GET to read, PUT to save). Signed-in users only.
 async function handleSettings(req, env) {
   if (req.method !== "GET" && req.method !== "PUT") return json({ error: "Method not allowed" }, 405);
   const user = await getUser(req, env);
@@ -364,16 +366,23 @@ async function handleSettings(req, env) {
   if (req.method === "PUT") {
     let body;
     try { body = await req.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
-    const checked = validatePreferences(body?.preferences);
-    if (!checked.ok) return json({ error: checked.error }, 400);
+    // "preferences" (ranked part types) and "filters" (pricing filters) can be saved together or on their own.
+    const hasPrefs = body?.preferences !== undefined, hasFilters = body?.filters !== undefined;
+    if (!hasPrefs && !hasFilters) return json({ error: "Preferences must be an object." }, 400);
+    const checked = hasPrefs ? validatePreferences(body.preferences) : null;
+    if (checked && !checked.ok) return json({ error: checked.error }, 400);
+    const checkedFilters = hasFilters ? validateFilters(body.filters) : null;
+    if (checkedFilters && !checkedFilters.ok) return json({ error: checkedFilters.error }, 400);
     try {
-      await savePreferences(env, user.id, checked.value);
+      if (checked) await savePreferences(env, user.id, checked.value);
+      if (checkedFilters) await saveFilters(env, user.id, checkedFilters.value);
     } catch (e) {
       console.error(e);
       return json({ error: "Settings can't be saved yet. The database needs updating (npm run db:init:remote)." }, 503);
     }
   }
-  return json({ preferences: await loadPreferences(env, user.id), catalog: CATALOG });
+  const stored = await loadStored(env, user.id);
+  return json({ preferences: stored.preferences, filters: stored.filters, catalog: CATALOG });
 }
 
 // Suggest series/parallel networks of common values for resistors and capacitors that aren't
