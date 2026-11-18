@@ -120,6 +120,13 @@
   .pcb3d .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; font-size: 13px; }
   .pcb3d .bar button { padding: 3px 10px; font-size: 13px; }
   .pcb3d .info { color: var(--muted); min-height: 1.4em; flex: 1; min-width: 160px; }
+  .card h2 { cursor: pointer; user-select: none; display: flex; align-items: center; gap: 6px; }
+  .card h2::before { content: "\25BE"; display: inline-block; transition: transform .15s; }
+  .card.collapsed h2::before { transform: rotate(-90deg); }
+  /* Collapsed: keep only the heading row visible */
+  .card.collapsed > :not(.card-head) { display: none !important; }
+  .card.collapsed .card-head > :not(h2) { display: none !important; }
+  .card.collapsed .card-head, .card.collapsed h2 { margin-bottom: 0 !important; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -1291,6 +1298,31 @@ $("#file").addEventListener("change", async (e) => {
   e.target.value = "";
   setStatus(`Loaded ${f.name}.`);
 });
+
+// ---------- collapsible cards ----------
+function makeCollapsible(card, key) {
+  const h = card.querySelector("h2");
+  if (!h) return;
+  let head = h; // heading row: the h2 itself, or the .row that contains it
+  while (head.parentElement !== card) head = head.parentElement;
+  head.classList.add("card-head");
+  const k = "collapsed:" + key;
+  const set = (c) => { card.classList.toggle("collapsed", c); h.setAttribute("aria-expanded", String(!c)); };
+  let saved = false;
+  try { saved = localStorage.getItem(k) === "1"; } catch {}
+  h.setAttribute("role", "button");
+  h.tabIndex = 0;
+  h.addEventListener("click", () => {
+    const c = !card.classList.contains("collapsed");
+    set(c);
+    try { localStorage.setItem(k, c ? "1" : "0"); } catch {}
+  });
+  h.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); h.click(); }
+  });
+  set(saved);
+}
+document.querySelectorAll(".card").forEach((c, i) => makeCollapsible(c, c.id || "circuit" + (i || "")));
 
 // ---------- boot ----------
 (async () => {
