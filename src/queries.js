@@ -37,6 +37,18 @@ const capQuery = (type, pkg, f) => {
   return `CAP ${t.word} ${f}${t.v[pkg] ? ` ${t.v[pkg]}` : ""}`;
 };
 
+// Logic gates are bought as 74HC-series ICs; channels per package tells how many gates one chip holds.
+const GATE2 = { "AND Gate": "08", "NAND Gate": "00", "OR Gate": "32", "NOR Gate": "02", "XOR Gate": "86" };
+const GATE3 = { "AND Gate": "11", "NAND Gate": "10", "NOR Gate": "27" };
+
+/** How many circuit elements one purchased package can hold (so the BOM orders chips, not gates). */
+export function channelsPerPackage(component, details = "") {
+  if (component === "Op-Amp") return 2;
+  if (component === "Inverter") return 6;
+  if (GATE2[component]) return /^3-input/.test(details) ? 3 : 4;
+  return 1;
+}
+
 // Simulation-only elements: nothing to buy.
 const NO_BUY = {
   "Voltage Source": "Simulation source, not a part",
@@ -115,6 +127,13 @@ export function buildQuery(row, pkg = "tht", opts = {}) {
     }
     case "Op-Amp":
       return guess(`LM358${tht ? " 8-DIP" : smd ? " 8-SOIC" : ""}`, "Generic op-amp; assumed LM358.");
+    case "Inverter":
+      return guess(`74HC04${tht ? " 14-DIP" : smd ? " 14-SOIC" : ""}`, "Assumed a 74HC04 hex inverter (six per chip).");
+    case "AND Gate": case "NAND Gate": case "OR Gate": case "NOR Gate": case "XOR Gate": {
+      const num = (/^3-input/.test(details) ? GATE3 : GATE2)[component];
+      if (!num) return none;
+      return guess(`74HC${num}${tht ? " 14-DIP" : smd ? " 14-SOIC" : ""}`, `Assumed a 74HC${num} logic IC (it holds several gates).`);
+    }
     case "555 Timer":
       return guess(`NE555${tht ? " 8-DIP" : smd ? " 8-SOIC" : ""}`, "Assumed a standard 555 timer.");
 

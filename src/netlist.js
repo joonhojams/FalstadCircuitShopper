@@ -67,11 +67,60 @@ const PINS = {
     return [["-", in1], ["+", in2], ["OUT", P2(e)]];
   },
 };
+
+/** PotElm.setPoints: point2 is rounded out to a multiple of 2 grid squares; the wiper sits at the dragged offset. */
+function potPins(e) {
+  const grid = 16;
+  const dx = e.x2 - e.x1, dy = e.y2 - e.y1;
+  const p1 = P1(e);
+  let p2 = P2(e), offset = 0;
+  const span = (d) => 2 * grid * sign(d) * Math.floor((Math.abs(d) + 2 * grid - 1) / (2 * grid));
+  if (Math.abs(dx) > Math.abs(dy)) { p2 = { x: p1.x + span(dx), y: p1.y }; offset = dx < 0 ? dy : -dy; }
+  else if (dy !== 0) { p2 = { x: p1.x, y: p1.y + span(dy) }; offset = dy > 0 ? dx : -dx; }
+  if (offset === 0) offset = grid;
+  return [["A", p1], ["B", p2], ["W", interp2(p1, p2, 0.5, offset)[0]]];
+}
+
+/** GateElm.setPoints: inputs sit on point1's side, spaced 16 px (8 when the small flag is set); output is point2. */
+function gatePins(e, n) {
+  const hs = e.flags & 1 ? 8 : 16;
+  const names = ["A", "B", "C", "D", "E", "F", "G", "H"];
+  const pins = [];
+  let i0 = -Math.trunc(n / 2);
+  for (let i = 0; i < n; i++, i0++) {
+    if (i0 === 0 && (n & 1) === 0) i0++;
+    pins.push([names[i], interp2(P1(e), P2(e), 0, hs * i0)[0]]);
+  }
+  pins.push(["Y", P2(e)]);
+  return pins;
+}
+
+/** ChipElm pin positions (TimerElm layout: 3 wide, 5 tall) with the flip flags applied. */
+function timerPins(e) {
+  const small = e.flags & 1;
+  const cspc = (small ? 1 : 2) * 8, cspc2 = cspc * 2;
+  const sizeX = 3, sizeY = 5;
+  const x0 = e.x1 + cspc2, y0 = e.y1;
+  const xs = sizeX * cspc2, ys = sizeY * cspc2;
+  const defs = [["DIS", 1, "W"], ["TRIG", 3, "W"], ["THR", 4, "W"], ["VCC", 1, "N"], ["CTL", 1, "S"], ["OUT", 2, "E"], ["RST", 1, "E"], ["GND", 2, "S"]];
+  const count = e.flags & 4 ? 8 : e.flags & 2 ? 7 : 6;
+  return defs.slice(0, count).map(([name, pos, side]) => {
+    let [px, py] = [x0, y0];
+    let [dx, dy, dax, day, sx, sy] = { N: [1, 0, 0, -1, 0, 0], S: [1, 0, 0, 1, 0, ys - cspc2], W: [0, 1, -1, 0, 0, 0], E: [0, 1, 1, 0, xs - cspc2, 0] }[side];
+    if (e.flags & 1024) { dx = -dx; dax = -dax; px += cspc2 * (sizeX - 1); sx = -sx; }
+    if (e.flags & 2048) { dy = -dy; day = -day; py += cspc2 * (sizeY - 1); sy = -sy; }
+    const xa = px + cspc2 * dx * pos + sx, ya = py + cspc2 * dy * pos + sy;
+    return [name, { x: xa + dax * cspc2, y: ya + day * cspc2 }];
+  });
+}
+
+const GATES = { 150: "and", 151: "nand", 152: "or", 153: "nor", 154: "xor", I: "not" };
 const PIN_FN = {
   r: PINS.two(["1", "2"]), c: PINS.two(["1", "2"]), l: PINS.two(["1", "2"]),
   d: PINS.two(["A", "K"]), z: PINS.two(["A", "K"]), 162: PINS.two(["A", "K"]),
   s: PINS.two(["1", "2"]), i: PINS.two(["-", "+"]),
   t: PINS.t, f: PINS.f, a: PINS.a,
+  174: potPins, pt: potPins, 165: timerPins, Timer: timerPins,
 };
 // Voltage sources: Falstad's point2 is the positive terminal.
 const SOURCE = { v: (e) => [["-", P1(e)], ["+", P2(e)]], R: (e) => [["+", P1(e)]] };
@@ -79,7 +128,9 @@ const SOURCE = { v: (e) => [["-", P1(e)], ["+", P2(e)]], R: (e) => [["+", P1(e)]
 const KIND = {
   r: "resistor", c: "capacitor", l: "inductor", d: "diode", z: "zener", 162: "led",
   s: "switch", i: "current-source", t: "bjt", f: "mosfet", a: "opamp",
+  174: "pot", pt: "pot", 165: "timer", Timer: "timer",
 };
+for (const c of Object.keys(GATES)) KIND[c] = "gate";
 
 /** Lines/tags that only draw wiring: wires, grounds and labeled nodes. */
 function wiring({ text, xml }) {
@@ -142,11 +193,18 @@ export function extractNetlist(raw, { mergeRails = true } = {}) {
   const parts = [], rails = [], sources = [], unsupported = {}, warnings = [];
   parsed.parts.forEach((e, i) => {
     const ref = refs[i];
-    const fn = PIN_FN[e.code];
-    if (fn) {
+    const isGate = Object.hasOwn(GATES, e.code);
+    const gateIn = isGate ? (e.code === "I" ? 1 : Math.trunc(field(e, 0, []) ?? 2)) : 0;
+    const fn = isGate ? (gateIn >= 1 && gateIn <= 3 ? (x) => gatePins(x, gateIn) : null) : PIN_FN[e.code];
+    if (isGate && !fn) {
+      unsupported[`${e.name} (${gateIn} inputs)`] = (unsupported[`${e.name} (${gateIn} inputs)`] ?? 0) + 1;
+    } else if (fn) {
       const pins = fn(e);
       pins.forEach(([, pt]) => dsu.find(key(pt)));
-      parts.push({ ref, kind: KIND[e.code], code: String(e.code), name: e.name, value: e.value, details: e.details, pins });
+      const part = { ref, kind: KIND[e.code], code: String(e.code), name: e.name, value: e.value, details: e.details, pins };
+      if (isGate) Object.assign(part, { fn: GATES[e.code], inputs: gateIn, highV: field(e, e.code === "I" ? 1 : 2, []) ?? 5 });
+      if (part.kind === "timer") Object.assign(part, { hasGroundPin: Boolean(e.flags & 4), hasReset: Boolean(e.flags & 6) });
+      parts.push(part);
     } else if (SOURCE[e.code]) {
       const pins = SOURCE[e.code](e);
       pins.forEach(([, pt]) => dsu.find(key(pt)));

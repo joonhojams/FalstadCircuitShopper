@@ -141,8 +141,127 @@ test("zip has valid structure and checksums", () => {
 
 test("IC library pinouts are consistent", () => {
   for (const ic of Object.values(ICS)) {
-    const pins = [ic.vpos, ic.vneg, ...ic.units.flat()];
-    assert.equal(new Set(pins).size, pins.length, ic.name);
-    assert.equal(pins.length, ic.pins, ic.name);
+    const pins = [...ic.units.flatMap((u) => Object.values(u)), ic.power.pos, ic.power.neg];
+    const total = Math.max(...pins.map(Number));
+    assert.equal(new Set(pins).size, total, ic.name);
+    for (const u of ic.units) {
+      const flat = Object.values(u);
+      assert.equal(new Set(flat).size, flat.length, `${ic.name} unit`);
+    }
   }
+});
+
+const rail5 = (x, y) => `R ${x} ${y} ${x} ${y - 24} 0 0 40 5 0 0 0.5`;
+const label = (r, ref, num) => r.labels.find((l) => l.ref === ref && l.num === num)?.net;
+
+test("potentiometer: ends and wiper land on the right nets and pads", () => {
+  // horizontal pot from (100,100) to (164,100): wiper is 16 px above the middle
+  const nl = extractNetlist(lines("174 100 100 164 100 0 10000 0.5 Volume", "g 100 100 100 120 0", rail5(132, 84)));
+  const pot = nl.parts.find((p) => p.kind === "pot");
+  const net = Object.fromEntries(pot.pins.map((p) => [p.name, p.net]));
+  assert.equal(net.A, "GND");
+  assert.equal(net.W, "+5V");
+  const r = buildProject(nl, { mounting: "tht" });
+  assert.ok(r.ok, r.errors?.join());
+  assert.equal(label(r, "RV1", "1"), "GND");
+  assert.equal(label(r, "RV1", "2"), "+5V");
+  assert.match(r.summary.parts.find((p) => p.ref === "RV1").footprint, /PinHeader_1x03/);
+  assert.ok(r.warnings.some((w) => /Potentiometer pads/.test(w)));
+});
+
+test("a PCB-mount pot picked in the BOM gets its real footprint; a panel pot gets a terminal block", () => {
+  const nl = extractNetlist(lines("174 100 100 164 100 0 10000 0.5 Volume", "g 100 100 100 120 0", rail5(132, 84)));
+  const bourns = buildProject(nl, { choices: { RV1: { mpn: "3296W-1-103LF", mounting: "Through Hole", package: "" } } });
+  assert.equal(bourns.summary.parts.find((p) => p.ref === "RV1").footprint, "Potentiometer_THT:Potentiometer_Bourns_3296W_Vertical");
+  assert.equal(bourns.summary.parts.find((p) => p.ref === "RV1").source, "BOM");
+  const panel = buildProject(nl, { choices: { RV1: { mpn: "P160KNP-0QC20B10K", mounting: "Panel Mount", description: "10K OHM 0.25W PANEL MOUNT" } } });
+  assert.match(panel.summary.parts.find((p) => p.ref === "RV1").footprint, /TerminalBlock/);
+});
+
+test("logic gate: inputs map to package pins, spare gates are tied low", () => {
+  const nl = extractNetlist(lines("150 200 100 264 100 0 2 0 5", "g 200 116 200 140 0", rail5(200, 84)));
+  const gate = nl.parts.find((p) => p.kind === "gate");
+  assert.deepEqual([gate.fn, gate.inputs], ["and", 2]);
+  const r = buildProject(nl, {});
+  assert.ok(r.ok, r.errors?.join());
+  const u = r.summary.packages[0];
+  assert.equal(u.ic, "74HC08");
+  assert.equal(label(r, "U1", "1"), "GND");   // input A on the lower pin
+  assert.equal(label(r, "U1", "2"), "+5V");   // input B
+  assert.equal(label(r, "U1", "14"), "+5V");
+  assert.equal(label(r, "U1", "7"), "GND");
+  assert.equal(label(r, "U1", "4"), "GND");   // spare gate input tied low
+  assert.match(r.files["circuit.kicad_sch"], /no_connect/);
+});
+
+test("the IC and package follow the part picked in the BOM", () => {
+  const nl = extractNetlist(lines("151 200 100 264 100 0 2 0 5", "g 200 116 200 140 0", rail5(200, 84)));
+  const nand = (c) => buildProject(nl, { choices: { U1: c } });
+  const dip = nand({ mpn: "SN74HC00N", package: "14-DIP (0.300\", 7.62mm)", mounting: "Through Hole" });
+  assert.equal(dip.summary.packages[0].ic, "74HC00");
+  assert.equal(dip.summary.parts.find((p) => p.ref === "U1").footprint, "Package_DIP:DIP-14_W7.62mm");
+  assert.equal(dip.summary.parts.find((p) => p.ref === "U1").value, "SN74HC00N");
+  const soic = nand({ mpn: "SN74HC00D", package: "14-SOIC (0.154\", 3.90mm Width)", mounting: "Surface Mount" });
+  assert.match(soic.summary.parts.find((p) => p.ref === "U1").footprint, /SOIC-14/);
+  // a pick that is a different gate type is ignored rather than building the wrong function
+  const wrong = buildProject(extractNetlist(lines("150 200 100 264 100 0 2 0 5", "g 200 116 200 140 0", rail5(200, 84))), { choices: { U1: { mpn: "SN74HC00N" } } });
+  assert.equal(wrong.summary.packages[0].ic, "74HC08");
+});
+
+test("three-input gates use triple-gate ICs; four inputs are blocked", () => {
+  const three = buildProject(extractNetlist(lines("152 200 100 264 100 0 3 0 5", rail5(200, 84))), {});
+  assert.equal(three.ok, false); // OR3 has no catalog IC: an error, not a wrong board
+  const nand3 = buildProject(extractNetlist(lines("151 200 100 264 100 0 3 0 5", rail5(200, 100))), {});
+  assert.equal(nand3.summary.packages[0].ic, "74HC10");
+  const four = extractNetlist(lines("150 200 100 264 100 0 4 0 5"));
+  assert.ok(four.unsupported.length);
+});
+
+test("555 timer: pins follow the Falstad chip layout and map to DIP-8 pins", () => {
+  // flags 6 = reset + ground pin; chip at (300,100): Vin on top at (364,68), gnd on bottom at (396,260)
+  const nl = extractNetlist(lines("165 300 100 396 100 6 0", rail5(364, 68), "g 396 260 396 280 0"));
+  const t = nl.parts.find((p) => p.kind === "timer");
+  assert.equal(t.pins.length, 8);
+  const r = buildProject(nl, {});
+  assert.ok(r.ok, r.errors?.join());
+  assert.equal(r.summary.packages[0].ic, "NE555");
+  assert.equal(label(r, "U1", "8"), "+5V");
+  assert.equal(label(r, "U1", "1"), "GND");
+  assert.match(r.summary.parts.find((p) => p.ref === "U1").footprint, /SOIC-8/);
+  assert.equal(buildProject(nl, { mounting: "tht" }).summary.parts.find((p) => p.ref === "U1").footprint, "Package_DIP:DIP-8_W7.62mm");
+});
+
+test("a 555 without ground or reset pins gets them wired on the board", () => {
+  const nl = extractNetlist(lines("165 300 100 396 100 0 0", rail5(364, 68)));
+  const r = buildProject(nl, {});
+  assert.ok(r.ok, r.errors?.join());
+  assert.equal(label(r, "U1", "1"), "GND");
+  assert.equal(label(r, "U1", "4"), "+5V");  // reset tied high
+});
+
+test("resistor and BJT footprints follow the BOM pick over the global setting", () => {
+  const nl = extractNetlist(lines(rail5(360, 84), "g 360 116 360 136 0", "t 300 100 360 100 0 1 0.7 0 100", "r 240 100 300 100 0 1000"));
+  const r = buildProject(nl, {
+    mounting: "tht",
+    choices: {
+      R1: { mpn: "RC0603FR-071KL", package: "0603 (1608 Metric)", mounting: "Surface Mount" },
+      Q1: { mpn: "BC547BTA", package: "TO-92-3", mounting: "Through Hole" },
+    },
+  });
+  assert.ok(r.ok, r.errors?.join());
+  assert.equal(r.summary.parts.find((p) => p.ref === "R1").footprint, "Resistor_SMD:R_0603_1608Metric");
+  assert.equal(r.summary.parts.find((p) => p.ref === "Q1").footprint, "Package_TO_SOT_THT:TO-92_Inline");
+  assert.ok(!r.warnings.some((w) => /TO-92 pin order/.test(w)), "BC547 pinout is known");
+  assert.equal(label(r, "Q1", "2"), "N001");  // base on pad 2
+});
+
+test("DigiKey parameters reach the price options", async () => {
+  const { cheapestOptions } = await import("../src/pricing.js");
+  const [o] = cheapestOptions([{
+    ManufacturerProductNumber: "X", Manufacturer: { Name: "M" }, QuantityAvailable: 99,
+    Parameters: [{ ParameterText: "Mounting Type", ValueText: "Surface Mount" }, { ParameterText: "Package / Case", ValueText: "0805 (2012 Metric)" }],
+    ProductVariations: [{ DigiKeyProductNumber: "D", StandardPricing: [{ BreakQuantity: 1, UnitPrice: 0.1 }], QuantityAvailableforPackageType: 99 }],
+  }], 1);
+  assert.equal(o.mounting, "Surface Mount");
+  assert.equal(o.package, "0805 (2012 Metric)");
 });

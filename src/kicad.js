@@ -6,7 +6,8 @@
 // Not validated against a real KiCad install by the test-suite here; see the structural checks in
 // the tests. Footprints use KiCad's standard library names.
 
-import { ICS, packagePins } from "./ics.js";
+import { ICS, icsFor, icFromChoice, defaultIc, packagePins } from "./ics.js";
+import { resolve, icFootprint } from "./footprints.js";
 
 const q = (s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 const n = (x) => Number(x.toFixed(3));
@@ -84,21 +85,30 @@ export function buildProject(netlist, opts = {}) {
   if (netlist.unsupported.length && !opts.ignoreUnsupported) {
     errors.push(`These elements can't be placed on a board yet: ${netlist.unsupported.map((u) => `${u.name} x${u.count}`).join(", ")}. They would be missing from the PCB.`);
   }
-  const opamps = netlist.parts.filter((p) => p.kind === "opamp");
-  for (const o of opamps) {
-    const id = opts.ics?.[o.ref];
-    if (!id) errors.push(`Choose an IC for ${o.ref} (op-amp).`);
-    else if (!ICS[id]) errors.push(`${o.ref}: unknown IC "${id}".`);
+  const choices = opts.choices ?? {};     // ref -> the part picked in the BOM
+  const LABEL = { opamp: "op-amp", gate: "logic gate", timer: "555 timer" };
+  const icParts = netlist.parts.filter((p) => LABEL[p.kind]);
+  const icOf = {};
+  for (const p of icParts) {
+    const id = opts.ics?.[p.ref] || icFromChoice(p, choices[p.ref]) || defaultIc(p);
+    if (!id) errors.push(`Choose an IC for ${p.ref} (${LABEL[p.kind]}).`);
+    else if (!ICS[id]) errors.push(`${p.ref}: unknown IC "${id}".`);
+    else if (!icsFor(p).some((i) => i.name === id)) errors.push(`${p.ref}: ${id} can't be used for this ${LABEL[p.kind]}.`);
+    else icOf[p.ref] = id;
   }
+  const opamps = icParts.filter((p) => p.kind === "opamp");
+  const gates = icParts.filter((p) => p.kind === "gate");
   // Supply nets for IC power pins.
   const volts = (net) => netlist.rails.find((r) => r.net === net)?.volts;
   let vpos = opts.supply?.pos, vneg = opts.supply?.neg ?? "GND";
-  if (opamps.length && !errors.length) {
+  if ((opamps.length || gates.length) && !errors.length) {
     if (!vpos) vpos = [...netlist.rails].filter((r) => r.volts > 0).sort((a, b) => b.volts - a.volts)[0]?.net;
     if (!vpos) errors.push("The ICs need a positive supply, but no DC rail was found. Add a rail or a ground-referenced DC source to the circuit.");
     else if (volts(vpos) === undefined && !netlist.nets.some((x) => x.name === vpos)) errors.push(`Supply net "${vpos}" does not exist.`);
   }
   if (errors.length) return { ok: false, errors };
+  // A logic gate runs from the rail closest to the voltage it was simulated at.
+  const logicRail = (g) => [...netlist.rails].filter((r) => r.volts > 0).sort((a, b) => Math.abs(a.volts - g.highV) - Math.abs(b.volts - g.highV))[0]?.net ?? vpos;
 
   // --- board items: { ref, symbol, value, footprint, pins: [{num, name, net}] } ---
   const items = [];
@@ -107,9 +117,10 @@ export function buildProject(netlist, opts = {}) {
 
   const used = {};
   for (const p of netlist.parts) {
-    if (p.kind === "opamp") continue;
-    const map = padsFor(p.kind, mounting);
-    const fp = (FOOTPRINTS[p.kind === "zener" ? "diode" : p.kind] ?? FOOTPRINTS.resistor)[mounting];
+    if (LABEL[p.kind]) continue;
+    const choice = choices[p.ref];
+    const fpKind = p.kind === "zener" ? "diode" : p.kind;
+    const r = resolve(fpKind, choice, mounting);
     const by = Object.fromEntries(p.pins.map((x) => [x.name, x.net]));
     let symbol, pins;
     if (["diode", "zener", "led"].includes(p.kind)) {
@@ -117,67 +128,77 @@ export function buildProject(netlist, opts = {}) {
       pins = [{ num: "2", net: by.A }, { num: "1", net: by.K }];
     } else if (p.kind === "bjt" || p.kind === "mosfet") {
       const names = p.kind === "bjt" ? ["B", "C", "E"] : ["G", "D", "S"];
-      const id = `${p.kind}_${mounting}`;
+      const map = r.pads;
+      const id = `${p.kind}_${names.map((nm) => map[nm]).join("")}`;
       symbol = defineSymbol({
         id, ref: "Q",
         left: [{ num: map[names[0]], name: names[0] }],
         right: [{ num: map[names[1]], name: names[1] }, { num: map[names[2]], name: names[2] }],
       });
       pins = names.map((nm) => ({ num: map[nm], net: by[nm] }));
-      if (p.kind === "bjt" && mounting === "tht") {
-        warnings.push(`${p.ref}: TO-92 pin order differs between parts (2N3904 is EBC, BC547 is CBE). The board assumes E-B-C; check the datasheet or swap pads before ordering.`);
-      }
-      if (p.kind === "mosfet" && mounting === "tht") {
-        warnings.push(`${p.ref}: assumes G-D-S for TO-220. Check the datasheet of the exact MOSFET.`);
-      }
+    } else if (p.kind === "pot") {
+      symbol = defineSymbol({ id: "pot", ref: "RV", left: [{ num: "1", name: "A" }], right: [{ num: "2", name: "W" }, { num: "3", name: "B" }] });
+      pins = [{ num: "1", net: by.A }, { num: "2", net: by.W }, { num: "3", net: by.B }];
     } else {
       symbol = defineSymbol(spec.two(`${p.kind}2`, { resistor: "R", capacitor: "C", inductor: "L", switch: "SW" }[p.kind] ?? "X", "1", "2"));
       pins = [{ num: "1", net: by["1"] }, { num: "2", net: by["2"] }];
     }
-    items.push({ ref: p.ref, symbol, value: p.value || p.details || "", footprint: fp, pins });
+    if (r.warning) warnings.push(`${p.ref}: ${r.warning}`);
+    items.push({ ref: p.ref, symbol, value: choice?.mpn || p.value || p.details || "", footprint: r.footprint, source: r.fromBom ? "BOM" : "default", mpn: choice?.mpn ?? "", pins });
     used[p.kind] = (used[p.kind] ?? 0) + 1;
   }
 
-  // Op-amps are packed into the chosen ICs, channel by channel, in reference order.
+  // Op-amps, gates and 555s are packed into the chosen ICs, channel by channel, in reference order.
   const packages = [];
-  const byIc = {};
-  for (const o of opamps) (byIc[opts.ics[o.ref]] ??= []).push(o);
   let uNum = 0;
   const refTaken = new Set(items.map((i) => i.ref).concat(netlist.parts.map((p) => p.ref)));
   const newRef = (prefix) => { let r; do { r = `${prefix}${++uNum}`; } while (refTaken.has(r)); refTaken.add(r); return r; };
-  const icPrefixCount = {};
+  const byIc = {};
+  for (const p of icParts) (byIc[icOf[p.ref]] ??= []).push(p);
   for (const [id, list] of Object.entries(byIc)) {
     const ic = ICS[id];
     for (let i = 0; i < list.length; i += ic.units.length) {
       const chunk = list.slice(i, i + ic.units.length);
       const nets = new Map();
-      const pinList = [];
-      ic.units.forEach(([inv, non, out], k) => {
-        const o = chunk[k];
-        if (o) {
-          const by = Object.fromEntries(o.pins.map((x) => [x.name, x.net]));
-          nets.set(inv, by["-"]); nets.set(non, by["+"]); nets.set(out, by.OUT);
-        } else {
-          // An unused channel: make it a unity-gain follower parked on ground so it can't oscillate.
+      let pos = vpos, neg = vneg;
+      if (ic.kind === "gate") { pos = logicRail(chunk[0]); neg = "GND"; }
+      ic.units.forEach((unit, k) => {
+        const part = chunk[k];
+        if (part) {
+          const by = Object.fromEntries(part.pins.map((x) => [x.name, x.net]));
+          if (ic.kind === "timer") {
+            by.GND ??= "GND";            // no ground pin in the simulation: it was circuit ground
+            by.RST ??= by.VCC;           // no reset pin: it was never pulled low
+            pos = by.VCC; neg = by.GND;
+          }
+          for (const [nm, num] of Object.entries(unit)) nets.set(num, by[nm] ?? null);
+        } else if (ic.kind === "opamp") {
+          // An unused channel: make it a unity-gain follower parked on the negative rail so it can't oscillate.
           const park = `UNUSED_${id}_${packages.length + 1}${String.fromCharCode(65 + k)}`;
-          nets.set(inv, park); nets.set(out, park); nets.set(non, vneg);
+          nets.set(unit["-"], park); nets.set(unit.OUT, park); nets.set(unit["+"], vneg);
+        } else {
+          // An unused gate: tie the inputs low (CMOS inputs must not float) and leave the output open.
+          for (const nm of ic.inputs) nets.set(unit[nm], "GND");
+          for (const nm of ic.outputs) nets.set(unit[nm], null);
         }
       });
-      nets.set(ic.vpos, vpos); nets.set(ic.vneg, vneg);
+      if (ic.kind !== "timer") { nets.set(ic.power.pos, pos); nets.set(ic.power.neg, neg); }
       const pp = packagePins(ic);
-      const mk = (list, power) => list.map((p) => ({ ...p, type: p.name === "V+" || p.name === "V-" ? "power_in" : p.name.endsWith("OUT") ? "output" : "input" }));
-      const symId = `${id}_${mounting}`;
-      defineSymbol({ id: symId, ref: "U", wide: true, left: mk(pp.left), right: mk(pp.right) });
-      for (const p of [...pp.left, ...pp.right]) pinList.push({ num: p.num, net: nets.get(p.num) });
-      const ref = chunk[0].ref;
-      icPrefixCount[id] = (icPrefixCount[id] ?? 0) + 1;
-      items.push({ ref: `U${ref.replace(/^\D+/, "")}`, symbol: symId, value: id, footprint: ic.footprints[mounting], pins: pinList });
-      packages.push({ ic: id, ref: `U${ref.replace(/^\D+/, "")}`, channels: chunk.map((c) => c.ref), unused: ic.units.length - chunk.length });
-      if (ic.units.length - chunk.length) warnings.push(`${id} ${ref}: ${ic.units.length - chunk.length} spare channel(s) are wired as parked followers.`);
-      if (opts.decouple !== false) {
+      defineSymbol({ id, ref: "U", wide: true, left: pp.left, right: pp.right });
+      const pinList = [...pp.left, ...pp.right].map((p) => ({ num: p.num, net: nets.get(p.num) ?? null }));
+      const choice = choices[chunk[0].ref];
+      const fp = icFootprint(ic, choice, mounting);
+      const ref = `U${chunk[0].ref.replace(/^\D+/, "")}`;
+      const mpn = choice && icFromChoice(chunk[0], choice) === id ? choice.mpn : "";
+      items.push({ ref, symbol: id, value: mpn || id, footprint: fp.footprint, source: fp.fromBom ? "BOM" : "default", mpn, pins: pinList });
+      packages.push({ ic: id, ref, channels: chunk.map((c) => c.ref), unused: ic.units.length - chunk.length });
+      if (ic.units.length - chunk.length) {
+        warnings.push(`${id} ${ref}: ${ic.units.length - chunk.length} spare channel(s) are ${ic.kind === "gate" ? "tied low with open outputs" : "wired as parked followers"}.`);
+      }
+      if (opts.decouple !== false && pos && neg) {
         const cref = newRef("C_DEC");
-        items.push({ ref: cref, symbol: defineSymbol(spec.two("capacitor2", "C", "1", "2")), value: "100nF", footprint: FOOTPRINTS.capacitor[mounting],
-          pins: [{ num: "1", net: vpos }, { num: "2", net: vneg }] });
+        items.push({ ref: cref, symbol: defineSymbol(spec.two("capacitor2", "C", "1", "2")), value: "100nF", footprint: resolve("capacitor", undefined, fp.mounting).footprint,
+          source: "default", mpn: "", pins: [{ num: "1", net: pos }, { num: "2", net: neg }] });
       }
     }
   }
@@ -210,7 +231,7 @@ export function buildProject(netlist, opts = {}) {
     placed.push({ it, def, x: 38.1 + col * CELL_W, y: rowY + h / 2 - 7.62, rows });
   });
 
-  const labels = [];
+  const labels = [], noConnects = [];
   for (const { it, def, x, y } of placed) {
     const hw = def.wide ? 7.62 : 5.08;
     const rows = Math.max(def.left.length, def.right.length, 1);
@@ -226,10 +247,12 @@ ${it.pins.map((p) => `    (pin ${q(p.num)} (uuid ${q(uuid())}))`).join("\n")}
     (instances (project ${q(name)} (path ${q(`/${root}`)} (reference ${q(it.ref)}) (unit 1)))))`);
 
     const place = (list, side) => list.forEach((p, i) => {
-      const net = it.pins.find((x) => x.num === p.num)?.net;
-      if (!net) return;
+      const pin = it.pins.find((x) => x.num === p.num);
+      if (!pin) return;
       const px = side === "L" ? -(hw + 2.54) : hw + 2.54;
       const py = ((rows - 1) * 2.54) / 2 - i * 2.54;
+      if (!pin.net) { noConnects.push({ x: n(x + px), y: n(y - py) }); return; }
+      const net = pin.net;
       labels.push({ net, x: n(x + px), y: n(y - py), angle: side === "L" ? 180 : 0, ref: it.ref, num: p.num });
     });
     place(def.left, "L");
@@ -248,6 +271,7 @@ ${[...symbols.values()].map(symbolDef).join("\n")}
   )
 ${out.join("\n")}
 ${labelText.join("\n")}
+${noConnects.map((c) => `  (no_connect (at ${c.x} ${c.y}) (uuid ${q(uuid())}))`).join("\n")}
   (sheet_instances (path "/" (page "1")))
   (embedded_fonts no)
 )
@@ -256,7 +280,7 @@ ${labelText.join("\n")}
 
   const summary = {
     name, mounting,
-    parts: items.map((i) => ({ ref: i.ref, value: i.value, footprint: i.footprint })),
+    parts: items.map((i) => ({ ref: i.ref, value: i.value, footprint: i.footprint, source: i.source, mpn: i.mpn })),
     packages, supplyNets,
     rails: netlist.rails,
     nets: netlist.nets.length,

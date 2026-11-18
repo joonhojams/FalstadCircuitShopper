@@ -36,6 +36,11 @@ const source = (_f, p) => {
   return [`${eng(amp, "V")} amplitude`, d];
 };
 
+const gate = (_f, p) => {
+  const n = Math.trunc(num(p, 0, 2));
+  return ["", n !== 2 ? `${n}-input` : ""];
+};
+
 const diode = (_f, p) => {
   const model = p.find((x) => !isNum(x)) ?? "";
   const vf = isNum(p[0]) ? Number(p[0]) : null;
@@ -62,11 +67,12 @@ const COMPONENTS = {
   S:   ["Switch (SPDT)",  () => ["", ""]],
   T:   ["Transformer",    (_f, p) => ["", p.length > 1 ? `Ratio ${p[1]}` : ""]],
   I:   ["Inverter",       () => ["", ""]],
-  150: ["AND Gate",       () => ["", ""]],
-  151: ["NAND Gate",      () => ["", ""]],
-  152: ["OR Gate",        () => ["", ""]],
-  153: ["NOR Gate",       () => ["", ""]],
-  154: ["XOR Gate",       () => ["", ""]],
+  150: ["AND Gate",       gate],
+  151: ["NAND Gate",      gate],
+  152: ["OR Gate",        gate],
+  153: ["NOR Gate",       gate],
+  154: ["XOR Gate",       gate],
+  165: ["555 Timer",      () => ["", ""]],
   L:   ["Logic Input",    () => ["", ""]],
   M:   ["Logic Output",   () => ["", ""]],
 };

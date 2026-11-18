@@ -521,9 +521,24 @@ $("#net-go").addEventListener("click", async () => {
 
 // ---------- KiCad export ----------
 let kcPicks = {};
+// The part chosen in the BOM for every circuit element, so the board uses the real package and pinout.
+function kcChoices() {
+  const out = {};
+  if (!current?.parts || !pricing) return out;
+  current.summary.forEach((s, i) => {
+    const o = pricing[i]?.options?.[0];
+    if (!o) return;
+    for (const p of current.parts) {
+      if (p.component === s.component && p.value === s.value && p.details === s.details) {
+        out[p.ref] = { mpn: o.mpn, package: o.package, supplierPackage: o.supplierPackage, mounting: o.mounting, description: o.description };
+      }
+    }
+  });
+  return out;
+}
 const kcBody = (download) => ({
   text: $("#input").value, mounting: $("#kc-mount").value, decouple: $("#kc-decouple").checked,
-  ics: kcPicks, download, name: (document.querySelector("#result-title")?.textContent || "circuit").replace(/^Parts list\s*·?\s*/, "") || "circuit",
+  ics: kcPicks, choices: kcChoices(), download, name: (document.querySelector("#result-title")?.textContent || "circuit").replace(/^Parts list\s*·?\s*/, "") || "circuit",
 });
 function resetKicad() {
   kcPicks = {};
@@ -531,18 +546,25 @@ function resetKicad() {
   $("#kc-status").textContent = "";
   $("#kc-dl-row").hidden = true;
 }
+const KC_KIND = { opamp: "op-amp", gate: "logic gate", timer: "555 timer" };
 function renderKicad(d) {
   const box = $("#kc-out");
   box.replaceChildren();
-  if (d.opamps.length) {
-    box.append(el("h3", { style: "font-size:14px;margin:12px 0 4px" }, "Choose an IC for each op-amp"));
-    for (const ref of d.opamps) {
-      const sel = el("select", { "data-ref": ref, onchange: () => { if (sel.value) kcPicks[ref] = sel.value; else delete kcPicks[ref]; kcCheck(); } },
-        el("option", { value: "" }, "Choose…"),
-        ...d.catalog.map((c) => el("option", { value: c.id, ...(kcPicks[ref] === c.id ? { selected: true } : {}) }, `${c.id} (${c.channels} ch) · ${c.desc}`)));
-      box.append(el("div", { class: "row", style: "margin:4px 0" }, el("strong", {}, ref), sel));
+  const chosen = Object.keys(kcChoices()).length;
+  box.append(el("p", { class: "hint" }, chosen
+    ? `Footprints follow the ${chosen} part(s) chosen in the price table above (package and mounting type). Parts without a choice use the mounting style selected here.`
+    : "No parts chosen yet. Look up prices above first and the board will use the real package of each part; until then it uses the mounting style selected here."));
+  if (d.ics.length) {
+    box.append(el("h3", { style: "font-size:14px;margin:12px 0 4px" }, "ICs"));
+    for (const ic of d.ics) {
+      const current = kcPicks[ic.ref] || ic.fromBom || ic.suggested || "";
+      const sel = el("select", { "data-ref": ic.ref, onchange: () => { if (sel.value) kcPicks[ic.ref] = sel.value; else delete kcPicks[ic.ref]; kcCheck(); } },
+        ...(ic.suggested || ic.fromBom ? [] : [el("option", { value: "" }, "Choose…")]),
+        ...ic.catalog.map((c) => el("option", { value: c.id, ...(current === c.id ? { selected: true } : {}) }, `${c.id} (${c.channels} ch) · ${c.desc}`)));
+      box.append(el("div", { class: "row", style: "margin:4px 0" }, el("strong", {}, ic.ref), el("span", { class: "muted" }, `${ic.name}${ic.details ? ` ${ic.details}` : ""}`), sel,
+        ic.fromBom && !kcPicks[ic.ref] ? el("span", { class: "tag" }, "from your BOM pick") : ""));
     }
-    box.append(el("p", { class: "hint" }, "Op-amps with the same IC share packages (a dual holds two). Power pins go to the highest positive rail and ground."));
+    box.append(el("p", { class: "hint" }, "Channels with the same IC share a package (a dual op-amp holds two, a quad gate four). Spare gate inputs are tied low and spare op-amps are parked."));
   }
   if (d.rails.length) box.append(el("p", { class: "hint" }, "Supply nets: " + d.rails.map((r) => `${r.net} (${r.volts} V)`).join(", ") + ", GND. All rails of the same voltage are one net, fed from one connector."));
   else box.append(el("p", { class: "hint" }, "No DC rail found in this circuit."));
@@ -550,7 +572,9 @@ function renderKicad(d) {
   for (const e of d.errors) box.append(el("p", { class: "hint", style: "color:var(--danger)" }, e));
   if (d.warnings.length) box.append(el("details", {}, el("summary", {}, `${d.warnings.length} warning(s)`), el("ul", {}, ...d.warnings.map((w) => el("li", {}, w)))));
   if (d.summary) {
-    box.append(el("p", { class: "hint" }, `${d.summary.parts.length} board parts: ` + d.summary.parts.map((p) => p.ref).join(", ")));
+    box.append(el("details", { open: true }, el("summary", {}, `${d.summary.parts.length} board parts`),
+      el("table", {}, el("thead", {}, el("tr", {}, ...["Ref", "Part", "Footprint", "From"].map((h) => el("th", {}, h)))),
+        el("tbody", {}, ...d.summary.parts.map((p) => el("tr", {}, el("td", {}, p.ref), el("td", {}, p.value), el("td", {}, p.footprint), el("td", { class: "muted" }, p.source || "")))))));
   }
   $("#kc-dl-row").hidden = !d.summary;
 }
@@ -700,10 +724,15 @@ const partLink = (o) => {
 const TIER_NAME = { premium: "premium brand", standard: "standard brand", budget: "budget brand" };
 const partMeta = (o) => [o.dkpn, o.packaging, o.manufacturer, TIER_NAME[o.tier], o.tariffed && "tariffed", o.marketplace && "marketplace"].filter(Boolean).join(" · ");
 
-function altRow(options) {
+function altRow(all, row) {
   return el("tr", { class: "alt", hidden: true },
-    el("td", { colspan: 6 }, el("ul", {}, ...options.map((o) =>
-      el("li", {}, partLink(o), ` · ${partMeta(o)} · ${money(o.unitPrice)} × ${o.orderQty} = ${money(o.total)} · stock ${o.stock}`)))));
+    el("td", { colspan: 6 }, el("ul", {}, ...all.slice(1).map((o, k) =>
+      el("li", {}, partLink(o), ` · ${partMeta(o)} · ${money(o.unitPrice)} × ${o.orderQty} = ${money(o.total)} · stock ${o.stock} `,
+        el("button", { class: "link", title: "Make this the chosen part (also used for the PCB footprint)", onclick: () => {
+          const list = pricing[row].options;
+          list.unshift(...list.splice(k + 1, 1));
+          renderPricing();
+        } }, "Use this"))))));
 }
 
 function renderPricing() {
@@ -750,7 +779,7 @@ function renderPricing() {
       }
       tbody.append(el("tr", {}, ...lead, searchCell, cell,
         el("td", { class: "num" }, money(best.unitPrice)), el("td", { class: "num" }, money(best.total))));
-      if (r.options.length > 1) tbody.append(altRow(r.options.slice(1)));
+      if (r.options.length > 1) tbody.append(altRow(r.options, i));
     } else {
       const [text, cls] = r.error ? [r.error, "err"]
         : !r.query ? [r.note || "Type a search and press Enter", "muted"]

@@ -293,7 +293,7 @@ const bob = await seedUser("bob", "bob-token");
     assert.equal(s0.body.FilterOptionsRequest.MinimumQuantityAvailable, 4);
     assert.equal(s0.headers.Authorization, "Bearer tok-1");
     assert.equal(s0.headers["X-DIGIKEY-Client-Id"], "dk-id");
-    assert.equal(searches.find((s) => s.body.Keywords.startsWith("LM358")).body.FilterOptionsRequest.MinimumQuantityAvailable, 3);
+    assert.equal(searches.find((s) => s.body.Keywords.startsWith("LM358")).body.FilterOptionsRequest.MinimumQuantityAvailable, 2, "3 op-amps fit in 2 dual packages");
 
     assert.equal(a.needQty, 4);
     assert.deepEqual(a.options.map((o) => o.mpn), ["CHEAP", "EXP"], "cheapest first; out-of-stock part dropped");

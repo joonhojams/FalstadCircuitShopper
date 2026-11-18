@@ -9,6 +9,15 @@ const descText = (p) =>
     ? p.Description
     : p.Description?.ProductDescription ?? p.Description?.DetailedDescription ?? "";
 
+const param = (p, ...names) => {
+  const list = Array.isArray(p.Parameters) ? p.Parameters : [];
+  for (const n of names) {
+    const hit = list.find((x) => String(x.ParameterText ?? "").toLowerCase() === n);
+    if (hit?.ValueText) return String(hit.ValueText);
+  }
+  return "";
+};
+
 /** Unit price that applies at `qty`: the largest break not above it (or the first break). */
 function priceAt(breaks, qty) {
   let unit = null;
@@ -62,6 +71,10 @@ export function cheapestOptions(products, needQty, { inStock = true, max = 3, ex
         manufacturer: p.Manufacturer?.Name ?? "",
         description: descText(p),
         packaging: v.PackageType?.Name ?? "",
+        // What the PCB export uses to pick a footprint.
+        mounting: param(p, "mounting type"),
+        package: param(p, "package / case"),
+        supplierPackage: param(p, "supplier device package"),
         orderQty,
         unitPrice,
         total,
