@@ -1,6 +1,7 @@
 import { bom } from "./parser.js";
 import { extractNetlist } from "./netlist.js";
 import { buildProject } from "./kicad.js";
+import { layoutBoard } from "./board.js";
 import { icFromChoice, defaultIc } from "./ics.js";
 import { icCatalog } from "./ics.js";
 import { zip } from "./zip.js";
@@ -458,6 +459,7 @@ async function handleKicad(req) {
       warnings: built.ok ? built.warnings : netlist.warnings,
       errors: built.ok ? [] : built.errors,
       summary: built.ok ? built.summary : null,
+      board: built.ok ? layoutBoard(built.summary.parts) : null,
     });
   }
   if (!built.ok) return json({ error: built.errors.join(" ") , errors: built.errors }, 422);

@@ -265,3 +265,20 @@ test("DigiKey parameters reach the price options", async () => {
   assert.equal(o.mounting, "Surface Mount");
   assert.equal(o.package, "0805 (2012 Metric)");
 });
+
+test("board preview: every part gets a body and a spot inside the board outline, no overlaps", async () => {
+  const { layoutBoard, bodyFor } = await import("../src/board.js");
+  assert.deepEqual([bodyFor("Resistor_SMD:R_0805_2012Metric").w, bodyFor("Resistor_SMD:R_0805_2012Metric").l], [2, 1.2]);
+  assert.equal(bodyFor("Capacitor_THT:CP_Radial_D5.0mm_P2.00mm").shape, "cyl");
+  const nl = extractNetlist(lines("R 0 0 0 -20 0 0 40 5 0 0 0.5", "r 0 0 60 0 0 1000", "c 60 0 120 0 0 1e-7 0", "g 120 0 120 20 0"));
+  const built = buildProject(nl, {});
+  assert.ok(built.ok);
+  const b = layoutBoard(built.summary.parts);
+  assert.equal(b.parts.length, built.summary.parts.length);
+  for (const p of b.parts) {
+    assert.ok(p.x - p.w / 2 >= 0 && p.x + p.w / 2 <= b.w && p.y - p.l / 2 >= 0 && p.y + p.l / 2 <= b.l, `${p.ref} inside board`);
+  }
+  for (const [i, a] of b.parts.entries()) for (const c of b.parts.slice(i + 1)) {
+    assert.ok(Math.abs(a.x - c.x) >= (a.w + c.w) / 2 || Math.abs(a.y - c.y) >= (a.l + c.l) / 2, `${a.ref} and ${c.ref} do not overlap`);
+  }
+});
