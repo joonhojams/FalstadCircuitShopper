@@ -113,6 +113,13 @@
   .net-opt .good { color: var(--accent); }
   tr.alt td { white-space: normal; background: var(--bg); font-size: 13px; }
   tr.alt ul { margin: 0; padding-left: 18px; }
+  .pcb3d { margin: 12px 0; }
+  .pcb3d canvas { display: block; width: 100%; height: 340px; border: 1px solid var(--line); border-radius: 8px;
+                  background: var(--bg); cursor: grab; touch-action: none; }
+  .pcb3d canvas:active { cursor: grabbing; }
+  .pcb3d .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; font-size: 13px; }
+  .pcb3d .bar button { padding: 3px 10px; font-size: 13px; }
+  .pcb3d .info { color: var(--muted); min-height: 1.4em; flex: 1; min-width: 160px; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -229,7 +236,7 @@
 
     <div class="card" id="kicad" hidden>
       <h2>PCB (KiCad 9)</h2>
-      <p class="hint">Creates a KiCad project with a schematic ready for layout. You choose the ICs for the op-amps, every DC rail of the same voltage is joined into one net, and a single power connector brings in all the supplies. You then place and route the board in KiCad (Update PCB from Schematic), and order from there.</p>
+      <p class="hint">Creates a KiCad project with a schematic and a board whose parts are already placed and wired as unrouted connections. You choose the ICs for the op-amps, every DC rail of the same voltage is joined into one net, and a single power connector brings in all the supplies. Open it in KiCad to adjust the placement, route the traces and order from there.</p>
       <div class="row">
         <label>Parts <select id="kc-mount"><option value="smd">Surface-mount</option><option value="tht">Through-hole</option></select></label>
         <label><input type="checkbox" id="kc-decouple" checked> 100 nF decoupling cap per IC</label>
@@ -534,6 +541,183 @@ $("#net-go").addEventListener("click", async () => {
   } finally { b.disabled = false; }
 });
 
+// ---------- 3D board preview (no libraries: projected polygons on a canvas) ----------
+const PCB_COLORS = { res: "#c9b48a", cap: "#b5895a", film: "#d97706", elec: "#2b3a67", ind: "#6b7280", diode: "#222831", led: "#ef4444",
+  tr: "#2d3138", ic: "#20242a", sw: "#9ca3af", conn: "#3b4252", pot: "#2563eb", other: "#6b7280" };
+function shade(hex, k) {
+  const n = parseInt(hex.slice(1), 16);
+  const c = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => Math.max(0, Math.min(255, Math.round(v * k))));
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+function boardFaces(board) {
+  const faces = [];
+  const ox = board.w / 2, oz = board.l / 2;
+  const box = (cx, cz, w, l, y0, y1, color, part) => {
+    const x0 = cx - w / 2 - ox, x1 = cx + w / 2 - ox, z0 = cz - l / 2 - oz, z1 = cz + l / 2 - oz;
+    const q = (pts, n) => faces.push({ pts, n, color, part });
+    q([[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]], [0, 1, 0]);
+    q([[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], [0, 0, 1]);
+    q([[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]], [0, 0, -1]);
+    q([[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]], [1, 0, 0]);
+    q([[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], [-1, 0, 0]);
+  };
+  const cyl = (cx, cz, d, y0, y1, color, part) => {
+    const N = 14, r = d / 2, top = [];
+    for (let i = 0; i < N; i++) {
+      const a0 = (i / N) * Math.PI * 2, a1 = ((i + 1) / N) * Math.PI * 2, am = (a0 + a1) / 2;
+      const p0 = [cx - ox + r * Math.cos(a0), cz - oz + r * Math.sin(a0)], p1 = [cx - ox + r * Math.cos(a1), cz - oz + r * Math.sin(a1)];
+      faces.push({ pts: [[p0[0], y0, p0[1]], [p1[0], y0, p1[1]], [p1[0], y1, p1[1]], [p0[0], y1, p0[1]]], n: [Math.cos(am), 0, Math.sin(am)], color, part });
+      top.push([p0[0], y1, p0[1]]);
+    }
+    faces.push({ pts: top, n: [0, 1, 0], color, part });
+  };
+  const B = board.thickness;
+  box(board.w / 2, board.l / 2, board.w, board.l, -B, 0, "#1c7c4f", -1);
+  const lines = [];
+  board.parts.forEach((p, i) => {
+    const color = PCB_COLORS[p.kind] || PCB_COLORS.other;
+    for (const d of p.pads || []) {             // copper pads, flat on the board
+      const x0 = d[0] - d[2] / 2 - ox, x1 = d[0] + d[2] / 2 - ox, z0 = d[1] - d[3] / 2 - oz, z1 = d[1] + d[3] / 2 - oz;
+      faces.push({ pts: [[x0, 0.03, z0], [x1, 0.03, z0], [x1, 0.03, z1], [x0, 0.03, z1]], n: [0, 1, 0], color: "#d4af37", part: -2 });
+    }
+    if (p.shape === "cyl") cyl(p.x, p.y, p.w, 0, p.h, color, i);
+    else box(p.x, p.y, p.w, p.l, 0, p.h, color, i);
+  });
+  for (const a of board.air || []) lines.push([[a[0] - ox, 0.06, a[1] - oz], [a[2] - ox, 0.06, a[3] - oz]]);
+  return { faces, lines };
+}
+let pcbCleanup = null;
+function mountBoardViewer(host, board) {
+  if (pcbCleanup) pcbCleanup();
+  const { faces, lines } = boardFaces(board);
+  const canvas = el("canvas", { role: "img", "aria-label": `Interactive 3D preview of the board, ${board.w} by ${board.l} mm` });
+  const info = el("span", { class: "info" }, "Drag to rotate · scroll or pinch to zoom · hover a part for details");
+  const labelsBox = el("input", { type: "checkbox", id: "pcb-labels" });
+  labelsBox.checked = board.parts.length <= 40;
+  const airBox = el("input", { type: "checkbox", id: "pcb-air" });
+  airBox.checked = true;
+  const view = { yaw: -0.6, pitch: 0.7, zoom: 1 };
+  const reset = () => Object.assign(view, { yaw: -0.6, pitch: 0.7, zoom: 1 });
+  host.append(
+    el("div", { class: "pcb3d" }, canvas,
+      el("div", { class: "bar" },
+        el("button", { onclick: () => { reset(); draw(); } }, "Reset view"),
+        el("button", { onclick: () => { Object.assign(view, { yaw: 0, pitch: Math.PI / 2 - 0.001 }); draw(); } }, "Top"),
+        el("label", {}, labelsBox, " Labels"),
+        ...(lines.length ? [el("label", { title: "Straight lines between pads that share a net; traces are not routed yet" }, airBox, " Connections")] : []),
+        info,
+        el("span", { class: "muted" }, `${board.w} × ${board.l} mm · ${board.real ? "auto-placed, not routed" : "illustrative layout"}`))));
+  const ctx = canvas.getContext("2d");
+  let hits = [], hover = -1, raf = 0;
+  const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+  function draw() {
+    raf = 0;
+    const dpr = window.devicePixelRatio || 1, W = canvas.clientWidth, H = canvas.clientHeight;
+    if (!W || !H) return;
+    if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) { canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr); }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    const diag = Math.hypot(board.w, board.l) * 1.1, dist = diag * 2.2;
+    const f = (Math.min(W, H * 1.4) / diag) * dist * view.zoom * 0.78;
+    const cy = Math.cos(view.yaw), sy = Math.sin(view.yaw), cp = Math.cos(view.pitch), sp = Math.sin(view.pitch);
+    const tf = ([x, y, z]) => {
+      const x1 = x * cy + z * sy, z1 = -x * sy + z * cy;
+      return [x1, y * cp - z1 * sp, y * sp + z1 * cp];
+    };
+    const drawn = [];
+    for (const fc of faces) {
+      const n = tf(fc.n);
+      if (n[2] <= 0.001) continue;                       // back face
+      const pts = fc.pts.map((p) => { const t = tf(p); const d = dist - t[2]; return [W / 2 + (f * t[0]) / d, H * 0.5 - (f * t[1]) / d, d]; });
+      drawn.push({ fc, pts, n, depth: pts.reduce((a, p) => a + p[2], 0) / pts.length });
+    }
+    // Board first, then parts far to near.
+    const rank = (p) => (p === -1 ? 0 : p === -2 ? 1 : 2);       // board, then pads, then part bodies far to near
+    drawn.sort((a, b) => rank(a.fc.part) - rank(b.fc.part) || b.depth - a.depth);
+    const proj = (pt) => { const t = tf(pt), d = dist - t[2]; return [W / 2 + (f * t[0]) / d, H * 0.5 - (f * t[1]) / d]; };
+    let linesDone = !airBox.checked || !lines.length;
+    const drawLines = () => {
+      linesDone = true;
+      ctx.strokeStyle = "#7dd3fc"; ctx.lineWidth = 1.25; ctx.beginPath();
+      for (const [a, b] of lines) { const p0 = proj(a), p1 = proj(b); ctx.moveTo(p0[0], p0[1]); ctx.lineTo(p1[0], p1[1]); }
+      ctx.stroke();
+    };
+    hits = [];
+    for (const { fc, pts, n } of drawn) {
+      if (!linesDone && fc.part >= 0) drawLines();
+      const light = 0.55 + 0.45 * Math.max(0, n[0] * 0.3 + n[1] * 0.8 + n[2] * 0.5) / 1.0;
+      ctx.beginPath();
+      pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])));
+      ctx.closePath();
+      ctx.fillStyle = shade(fc.color, fc.part === hover ? Math.min(1.5, light * 1.35) : light);
+      ctx.fill();
+      ctx.strokeStyle = fc.part === -1 ? "rgba(0,0,0,.35)" : "rgba(0,0,0,.25)";
+      ctx.lineWidth = 0.75;
+      ctx.stroke();
+      if (fc.part >= 0) hits.push({ part: fc.part, pts });
+    }
+    if (!linesDone) drawLines();
+    if (labelsBox.checked) {
+      ctx.font = "10px system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillStyle = css("--text") || "#000";
+      board.parts.forEach((p) => {
+        const t = tf([p.x - board.w / 2, p.h, p.y - board.l / 2]); const d = dist - t[2];
+        ctx.fillText(p.ref, W / 2 + (f * t[0]) / d, H * 0.5 - (f * t[1]) / d - 3);
+      });
+    }
+  }
+  const redraw = () => { if (!raf) raf = requestAnimationFrame(draw); };
+
+  const inside = (pts, x, y) => {
+    let c = false;
+    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+      if ((pts[i][1] > y) !== (pts[j][1] > y) && x < ((pts[j][0] - pts[i][0]) * (y - pts[i][1])) / (pts[j][1] - pts[i][1]) + pts[i][0]) c = !c;
+    }
+    return c;
+  };
+  const pointers = new Map();
+  let pinch = 0;
+  canvas.addEventListener("pointerdown", (e) => { canvas.setPointerCapture(e.pointerId); pointers.set(e.pointerId, [e.clientX, e.clientY]); pinch = 0; });
+  const up = (e) => { pointers.delete(e.pointerId); pinch = 0; };
+  canvas.addEventListener("pointerup", up);
+  canvas.addEventListener("pointercancel", up);
+  canvas.addEventListener("pointermove", (e) => {
+    const prev = pointers.get(e.pointerId);
+    if (prev && pointers.size === 1) {
+      view.yaw += (e.clientX - prev[0]) * 0.01;
+      view.pitch = Math.max(0.05, Math.min(Math.PI / 2 - 0.001, view.pitch + (e.clientY - prev[1]) * 0.01));
+      pointers.set(e.pointerId, [e.clientX, e.clientY]);
+      redraw();
+    } else if (prev && pointers.size === 2) {
+      pointers.set(e.pointerId, [e.clientX, e.clientY]);
+      const [a, b] = [...pointers.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+      if (pinch) view.zoom = Math.max(0.4, Math.min(6, view.zoom * (d / pinch)));
+      pinch = d; redraw();
+    } else {
+      const r = canvas.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+      let h = -1;
+      for (let i = hits.length - 1; i >= 0; i--) if (inside(hits[i].pts, x, y)) { h = hits[i].part; break; }
+      if (h !== hover) {
+        hover = h;
+        const p = board.parts[h];
+        info.textContent = p ? `${p.ref} · ${p.value} · ${p.footprint.split(":").pop()}` : "Drag to rotate · scroll or pinch to zoom · hover a part for details";
+        redraw();
+      }
+    }
+  });
+  canvas.addEventListener("wheel", (e) => { e.preventDefault(); view.zoom = Math.max(0.4, Math.min(6, view.zoom * Math.exp(-e.deltaY * 0.0015))); redraw(); }, { passive: false });
+  labelsBox.addEventListener("change", redraw);
+  airBox.addEventListener("change", redraw);
+  const ro = new ResizeObserver(redraw);
+  ro.observe(canvas);
+  const mq = matchMedia("(prefers-color-scheme: dark)");
+  mq.addEventListener("change", redraw);
+  pcbCleanup = () => { ro.disconnect(); mq.removeEventListener("change", redraw); cancelAnimationFrame(raf); pcbCleanup = null; };
+  redraw();
+}
+
 // ---------- KiCad export ----------
 let kcPicks = {};
 // The part chosen in the BOM for every circuit element, so the board uses the real package and pinout.
@@ -556,6 +740,7 @@ const kcBody = (download) => ({
   ics: kcPicks, choices: kcChoices(), download, name: (document.querySelector("#result-title")?.textContent || "circuit").replace(/^Parts list\s*·?\s*/, "") || "circuit",
 });
 function resetKicad() {
+  if (pcbCleanup) pcbCleanup();
   kcPicks = {};
   $("#kc-out").replaceChildren();
   $("#kc-status").textContent = "";
@@ -585,9 +770,10 @@ function renderKicad(d) {
   else box.append(el("p", { class: "hint" }, "No DC rail found in this circuit."));
   for (const u of d.unsupported) box.append(el("p", { class: "hint", style: "color:var(--danger)" }, `Can't be placed on a board yet: ${u.name} ×${u.count}`));
   for (const e of d.errors) box.append(el("p", { class: "hint", style: "color:var(--danger)" }, e));
+  if (d.board) { const host = el("div", {}); box.append(host); mountBoardViewer(host, d.board); }
   if (d.warnings.length) box.append(el("details", {}, el("summary", {}, `${d.warnings.length} warning(s)`), el("ul", {}, ...d.warnings.map((w) => el("li", {}, w)))));
   if (d.summary) {
-    box.append(el("details", { open: true }, el("summary", {}, `${d.summary.parts.length} board parts`),
+    box.append(el("details", {}, el("summary", {}, `${d.summary.parts.length} board parts`),
       el("table", {}, el("thead", {}, el("tr", {}, ...["Ref", "Part", "Footprint", "From"].map((h) => el("th", {}, h)))),
         el("tbody", {}, ...d.summary.parts.map((p) => el("tr", {}, el("td", {}, p.ref), el("td", {}, p.value), el("td", {}, p.footprint), el("td", { class: "muted" }, p.source || "")))))));
   }

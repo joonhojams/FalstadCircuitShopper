@@ -1,6 +1,7 @@
 import { bom } from "./parser.js";
 import { extractNetlist } from "./netlist.js";
 import { buildProject } from "./kicad.js";
+import { layoutBoard } from "./board.js";
 import { icFromChoice, defaultIc } from "./ics.js";
 import { icCatalog } from "./ics.js";
 import { zip } from "./zip.js";
@@ -458,6 +459,7 @@ async function handleKicad(req) {
       warnings: built.ok ? built.warnings : netlist.warnings,
       errors: built.ok ? [] : built.errors,
       summary: built.ok ? built.summary : null,
+      board: built.ok ? (built.pcb ?? layoutBoard(built.summary.parts)) : null,
     });
   }
   if (!built.ok) return json({ error: built.errors.join(" ") , errors: built.errors }, 422);
@@ -473,8 +475,9 @@ const kicadReadme = (b) => `KiCad project generated from a CircuitJS circuit.
 
 1. Unzip, open ${b.summary.name}.kicad_pro in KiCad 9.
 2. Open the schematic and run Inspect > Electrical Rules Check.
-3. Open the PCB editor and choose Tools > Update PCB from Schematic (F8).
-4. Place, route, run Design Rules Check, then plot Gerbers.
+3. Open the PCB editor. ${b.summary.board ? `The board already holds every footprint, placed automatically inside a ${b.summary.board.width} x ${b.summary.board.height} mm outline, with its nets assigned and no traces drawn.
+   Choose Tools > Update PCB from Schematic (F8) once to confirm it matches the schematic.` : "Choose Tools > Update PCB from Schematic (F8) to bring in the parts."}
+4. ${b.summary.board ? "Adjust the placement, route (Route > Interactive Router, or an autorouter plugin such as Freerouting)" : "Place, route"}, run Design Rules Check, then plot Gerbers.
 
 Nets are connected by name labels on every pin. Footprints are KiCad standard-library
 names (${b.summary.mounting === "tht" ? "through-hole" : "surface-mount"}); change them in the schematic if you want other sizes.

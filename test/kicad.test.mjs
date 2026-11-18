@@ -265,3 +265,134 @@ test("DigiKey parameters reach the price options", async () => {
   assert.equal(o.mounting, "Surface Mount");
   assert.equal(o.package, "0805 (2012 Metric)");
 });
+
+test("board preview: every part gets a body and a spot inside the board outline, no overlaps", async () => {
+  const { layoutBoard, bodyFor } = await import("../src/board.js");
+  assert.deepEqual([bodyFor("Resistor_SMD:R_0805_2012Metric").w, bodyFor("Resistor_SMD:R_0805_2012Metric").l], [2, 1.2]);
+  assert.equal(bodyFor("Capacitor_THT:CP_Radial_D5.0mm_P2.00mm").shape, "cyl");
+  const nl = extractNetlist(lines("R 0 0 0 -20 0 0 40 5 0 0 0.5", "r 0 0 60 0 0 1000", "c 60 0 120 0 0 1e-7 0", "g 120 0 120 20 0"));
+  const built = buildProject(nl, {});
+  assert.ok(built.ok);
+  const b = layoutBoard(built.summary.parts);
+  assert.equal(b.parts.length, built.summary.parts.length);
+  for (const p of b.parts) {
+    assert.ok(p.x - p.w / 2 >= 0 && p.x + p.w / 2 <= b.w && p.y - p.l / 2 >= 0 && p.y + p.l / 2 <= b.l, `${p.ref} inside board`);
+  }
+  for (const [i, a] of b.parts.entries()) for (const c of b.parts.slice(i + 1)) {
+    assert.ok(Math.abs(a.x - c.x) >= (a.w + c.w) / 2 || Math.abs(a.y - c.y) >= (a.l + c.l) / 2, `${a.ref} and ${c.ref} do not overlap`);
+  }
+});
+
+// ---- .kicad_pcb ----
+import { parseSexp, kids, kid } from "../scripts/sexp.mjs";
+import { FOOTPRINT_DATA } from "../src/footprint-data.js";
+import { missingFootprints } from "../src/pcb.js";
+import { resolve, icFootprint } from "../src/footprints.js";
+
+const detUuid = () => { let k = 0; return () => `00000000-0000-4000-8000-${String(++k).padStart(12, "0")}`; };
+const ampBuild = () => buildProject(extractNetlist(amp), { name: "amp", ics: { U1: "LM358", U2: "LM358", U3: "LM358" }, uuid: detUuid() });
+
+test("every footprint the app can choose has geometry (and so exists in the KiCad library it was read from)", () => {
+  const names = new Set();
+  for (const kind of ["resistor", "capacitor", "inductor", "diode", "zener", "led", "switch", "bjt", "mosfet", "pot"]) {
+    for (const mount of ["smd", "tht"]) {
+      names.add(resolve(kind, undefined, mount).footprint);
+      for (const mounting of ["Surface Mount", "Through Hole"]) {
+        for (const pkg of ["0201", "0402", "0603", "0805", "1206", "1210", "1812", "2010", "2512", "SOT-23", "SOT-223", "TO-252", "TO-92", "TO-220", "SOD-123", "SOD-323", "SMA", "SMB", "DO-41", "DO-35", "radial", "film", "axial"]) {
+          names.add(resolve(kind, { package: pkg, mounting, description: pkg === "radial" ? "aluminum electrolytic" : pkg === "film" ? "film polyester" : "" }, mount).footprint);
+        }
+      }
+    }
+  }
+  for (const mpn of ["3296W-1-103", "3296P-1-103", "3296Y-1-103", "3386P-1-103", "RK09K1130A5G"]) names.add(resolve("pot", { mpn, mounting: "Through Hole" }, "tht").footprint);
+  for (const ic of Object.values(ICS)) for (const m of ["smd", "tht"]) names.add(icFootprint(ic, undefined, m).footprint);
+  for (const pk of ["tssop", "msop"]) for (const ic of Object.values(ICS)) names.add(icFootprint(ic, { package: pk }, "smd").footprint);
+  const missing = [...names].filter((n) => !FOOTPRINT_DATA[n]);
+  assert.deepEqual(missing, [], `no geometry for: ${missing.join(", ")}`);
+});
+
+test(".kicad_pcb is well formed, links to the schematic symbols and carries the schematic's nets on its pads", () => {
+  const r = ampBuild();
+  assert.ok(r.ok, r.errors?.join());
+  const pcb = parseSexp(r.files["amp.kicad_pcb"]);
+  const sch = parseSexp(r.files["amp.kicad_sch"]);
+  assert.equal(pcb[0], "kicad_pcb");
+  const fps = kids(pcb, "footprint");
+  assert.equal(fps.length, r.summary.parts.length);
+
+  // symbol uuid by reference in the schematic
+  const symUuid = {};
+  for (const s of kids(sch, "symbol")) symUuid[kids(s, "property").find((p) => p[1] === "Reference")[2]] = kid(s, "uuid")[1];
+
+  // net table: ids are unique and every pad net matches it
+  const table = new Map(kids(pcb, "net").map((n) => [n[1], n[2]]));
+  assert.equal(table.get("0"), "");
+  assert.equal(new Set(table.keys()).size, table.size);
+
+  const want = new Map(r.labels.map((l) => [`${l.ref}:${l.num}`, `/${l.net}`]));
+  let checked = 0;
+  for (const f of fps) {
+    const ref = kids(f, "property").find((p) => p[1] === "Reference")[2];
+    assert.equal(kid(f, "path")[1], `/${symUuid[ref]}`, `${ref} is linked to its symbol`);
+    assert.ok(kid(f, "attr"), `${ref} has an attr`);
+    assert.ok(kids(f, "pad").length > 0, `${ref} has pads`);
+    for (const pad of kids(f, "pad")) {
+      const net = kid(pad, "net");
+      const expected = want.get(`${ref}:${pad[1]}`);
+      if (expected === undefined) { assert.equal(net, undefined, `${ref}.${pad[1]} should be unconnected`); continue; }
+      assert.equal(net[2], expected, `${ref}.${pad[1]} net`);
+      assert.equal(table.get(net[1]), expected, `${ref}.${pad[1]} net id matches the table`);
+      checked++;
+    }
+  }
+  assert.equal(checked, r.labels.length, "every labelled pin ended up on a pad");
+});
+
+test("placement keeps courtyards apart and inside the board outline, with J1 on the left edge", () => {
+  const r = ampBuild();
+  const pcb = parseSexp(r.files["amp.kicad_pcb"]);
+  const rect = kid(pcb, "gr_rect");
+  const [x0, y0] = kid(rect, "start").slice(1).map(Number), [x1, y1] = kid(rect, "end").slice(1).map(Number);
+  assert.equal(kid(rect, "layer")[1], "Edge.Cuts");
+  assert.ok(r.pcb.real && r.pcb.w === x1 - x0 && r.pcb.l === y1 - y0, "preview size equals the outline");
+
+  const layout = r.layout;
+  const boxes = layout.parts.map((p) => ({ ref: p.it.ref, b: p.box }));
+  for (const { ref, b } of boxes) assert.ok(b[0] >= 0 && b[1] >= 0 && b[2] <= layout.w && b[3] <= layout.l, `${ref} is inside the board`);
+  for (const [i, a] of boxes.entries()) for (const c of boxes.slice(i + 1)) {
+    assert.ok(a.b[2] <= c.b[0] || c.b[2] <= a.b[0] || a.b[3] <= c.b[1] || c.b[3] <= a.b[1], `${a.ref} and ${c.ref} courtyards overlap`);
+  }
+  const j1 = layout.parts.find((p) => p.it.ref === "J1");
+  assert.ok(layout.parts.every((p) => p === j1 || p.box[0] > j1.box[2]), "J1 is the leftmost part");
+});
+
+test("decoupling capacitors land next to their IC", () => {
+  const r = ampBuild();
+  const near = (ic, cap) => {
+    const a = r.pcb.parts.find((p) => p.ref === ic), b = r.pcb.parts.find((p) => p.ref === cap);
+    return Math.hypot(a.x - b.x, a.y - b.y);
+  };
+  const first = r.summary.packages[0];
+  const cap = r.summary.parts.find((p) => p.ref.startsWith("C_DEC")).ref;
+  assert.ok(near(first.ref, cap) < 9, `${cap} is ${near(first.ref, cap).toFixed(1)} mm from ${first.ref}`);
+});
+
+test("output is deterministic", () => {
+  assert.equal(ampBuild().files["amp.kicad_pcb"], ampBuild().files["amp.kicad_pcb"]);
+});
+
+test("a footprint without geometry blocks the .kicad_pcb with a warning instead of writing a partial board", () => {
+  assert.deepEqual(missingFootprints([{ footprint: "Resistor_SMD:R_0805_2012Metric" }, { footprint: "Nope:Nothing" }]), ["Nope:Nothing"]);
+});
+
+test("the zip carries the board", () => {
+  const r = ampBuild();
+  const bytes = new TextDecoder("latin1").decode(zip(r.files));
+  for (const f of ["amp.kicad_sch", "amp.kicad_pro", "amp.kicad_pcb"]) assert.ok(bytes.includes(f), f);
+});
+
+test("a capacitor size KiCad does not have falls back with a warning", () => {
+  const c = resolve("capacitor", { package: "2512", mounting: "Surface Mount" }, "smd");
+  assert.equal(c.footprint, "Capacitor_SMD:C_1812_4532Metric");
+  assert.match(c.warning, /no 2512 capacitor footprint/);
+});
