@@ -35,9 +35,10 @@ test/                 Parser and API tests
 
 After you generate a parts list, the **PCB (KiCad 9)** card turns the circuit into a KiCad project.
 
-1. Press **Check circuit**. Pick an IC for every op-amp (LM358, TL072, MCP6002, LM324). Op-amps that share an IC are packed into the same package, and unused channels are parked.
-2. Choose surface-mount or through-hole parts and press **Download KiCad project**.
-3. Unzip, open the `.kicad_pro` in KiCad 9, run ERC, then in the PCB editor use *Update PCB from Schematic* (F8). Place, route and order from KiCad.
+1. Look up prices first (optional but recommended), then press **Check circuit**. **The board follows the parts chosen in the price table** (use *Use this part* on an alternative to change the pick): each part's DigiKey package and mounting type pick its footprint, so a 0603 resistor, a TO-92 BC547 or a DIP-14 `SN74HC00N` lands on the right pads. Parts with no pick use the mounting style selected in the card.
+2. Pick an IC for each op-amp (LM358, TL072, MCP6002, LM324). Logic gates and 555 timers get a sensible IC by default (74HC00/02/04/08/10/11/27/32/86, NE555), or the one implied by the part number you chose in the BOM. Channels that share an IC are packed into one package; spare gates have their inputs tied low and spare op-amps are parked.
+3. Press **Download KiCad project**.
+4. Unzip, open the `.kicad_pro` in KiCad 9, run ERC, then in the PCB editor use *Update PCB from Schematic* (F8). Place, route and order from KiCad.
 
 How it works:
 
@@ -45,7 +46,11 @@ How it works:
 - **All DC rails of the same voltage become one net** (for example `+5V`) and a single power connector `J1` carries every supply and ground. IC power pins go to the highest positive rail and ground, with a 100 nF decoupling capacitor per IC.
 - Nets are joined by labels on every pin rather than drawn wires; footprints are KiCad standard-library names.
 
-Limits: only resistors, capacitors, inductors, diodes, zeners, LEDs, switches, BJTs, MOSFETs and op-amps are placed. Anything else (transformers, logic gates, 555 timers, potentiometers) blocks the export so the board is never silently incomplete. Transistor and IC pinouts differ between exact parts, so check the datasheet. The generator was not run through a real KiCad install here: open the result and run ERC first.
+- **Potentiometers** get three pads (1 = one end, 2 = wiper, 3 = other end). Known PCB-mount families (Bourns 3296/3386, Alps RK09K) use their real footprint; a panel-mount pot gets a 3-way screw terminal so it can be wired off-board; anything else gets a generic 3 x 2.54 mm row of holes and a warning.
+- **Logic gates** (2- and 3-input AND/NAND/NOR, 2-input OR/XOR, inverters) run from the rail closest to the voltage they were simulated at. **555 timers** use the chip's real pin layout from the simulation, tie ground and reset on the board when the simulation had no such pins, and map to a DIP-8 / SOIC-8.
+- The BOM also counts chips, not channels: three op-amps order two dual packages, five NAND gates order two quad packages.
+
+Limits: only resistors, capacitors, inductors, diodes, zeners, LEDs, switches, potentiometers, BJTs, MOSFETs, op-amps, logic gates (up to 3 inputs, where a catalog IC exists) and 555 timers are placed. Anything else (transformers, wider gates, other chips) blocks the export so the board is never silently incomplete. Transistor and IC pinouts differ between exact parts, so check the datasheet. The generator was not run through a real KiCad install here: open the result and run ERC first.
 
 ## How to run the app
 

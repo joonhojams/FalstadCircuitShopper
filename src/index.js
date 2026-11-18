@@ -1,6 +1,7 @@
 import { bom } from "./parser.js";
 import { extractNetlist } from "./netlist.js";
 import { buildProject } from "./kicad.js";
+import { icFromChoice, defaultIc } from "./ics.js";
 import { icCatalog } from "./ics.js";
 import { zip } from "./zip.js";
 import { login, callback, logout, getUser, authConfigured } from "./auth.js";
@@ -8,7 +9,7 @@ import { register, signIn } from "./password.js";
 import { analyse, SERIES } from "./networks.js";
 import { applyBrandRanking } from "./brands.js";
 import { CATALOG, validatePreferences, validateFilters, loadPreferences, loadStored, savePreferences, saveFilters } from "./preferences.js";
-import { candidates } from "./queries.js";
+import { candidates, channelsPerPackage } from "./queries.js";
 import { cheapestOptions } from "./pricing.js";
 import { DigiKeyError, digikeyConfigured, getToken, searchKeyword } from "./digikey.js";
 import {
@@ -229,7 +230,9 @@ async function handlePricing(req, env) {
   const plan = items.map((it) => {
     const qty = Math.floor(Number(it?.quantity));
     if (!(qty >= 1)) return { error: "Invalid quantity" };
-    const needQty = Math.min(1_000_000, qty * boards);
+    // Multi-channel ICs: order chips, not channels (a dual op-amp holds two, a quad gate four...).
+    const per = channelsPerPackage(str(it?.component, 60), str(it?.details, 120));
+    const needQty = Math.min(1_000_000, Math.ceil(qty / per) * boards);
     const override = str(it?.query, 250).trim();
     const options = override
       ? [{ query: override }]
@@ -408,6 +411,18 @@ async function handleNetworks(req) {
   return json(analyse(result.summary, { resistorSeries, capacitorSeries, tolerance }));
 }
 
+// The part picked in the BOM for each reference, trimmed to the fields the footprint chooser reads.
+function cleanChoices(input) {
+  const out = {};
+  if (!input || typeof input !== "object") return out;
+  for (const [ref, c] of Object.entries(input).slice(0, 500)) {
+    if (!c || typeof c !== "object") continue;
+    const f = (v) => (typeof v === "string" ? v.slice(0, 200) : "");
+    out[String(ref).slice(0, 20)] = { mpn: f(c.mpn), package: f(c.package), supplierPackage: f(c.supplierPackage), mounting: f(c.mounting), description: f(c.description) };
+  }
+  return out;
+}
+
 async function handleKicad(req) {
   let body;
   try { body = await req.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
@@ -424,13 +439,20 @@ async function handleKicad(req) {
     supply: body.supply && typeof body.supply === "object" ? body.supply : undefined,
     decouple: body.decouple !== false,
     ignoreUnsupported: body.ignoreUnsupported === true,
+    choices: cleanChoices(body.choices),
   };
   const built = buildProject(netlist, opts);
   if (!body.download) {
     // Preview: what the user must decide, and what would be built.
     return json({
       opamps: netlist.parts.filter((p) => p.kind === "opamp").map((p) => p.ref),
-      catalog: icCatalog(),
+      // Every part that needs an IC: what can be chosen, and what the BOM pick already implies.
+      ics: netlist.parts.filter((p) => ["opamp", "gate", "timer"].includes(p.kind)).map((p) => ({
+        ref: p.ref, kind: p.kind, name: p.name, details: p.details,
+        catalog: icCatalog(p),
+        fromBom: icFromChoice(p, opts.choices[p.ref]),
+        suggested: defaultIc(p),
+      })),
       rails: netlist.rails,
       unsupported: netlist.unsupported,
       warnings: built.ok ? built.warnings : netlist.warnings,
