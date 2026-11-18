@@ -59,6 +59,11 @@
   #signin-msg { min-height: 1.3em; font-size: 13px; color: var(--danger); }
   #status { min-height: 1.4em; margin-top: 8px; font-size: 14px; color: var(--muted); }
   #status.error { color: var(--danger); }
+  .spinner { display: inline-block; width: 14px; height: 14px; margin-right: 8px; vertical-align: -2px;
+             border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%;
+             animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.5s; } }
   .tabs { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
   .tabs button { border: 0; border-radius: 0; background: transparent; }
   .tabs button[aria-pressed=true] { background: var(--accent); color: var(--accent-text); }
@@ -189,6 +194,7 @@
           <label title="Only parts DigiKey normally keeps in stock"><input type="checkbox" id="normally"> Usually stocking only</label>
           <label title="Uncheck to leave out parts DigiKey flags as having an active tariff"><input type="checkbox" id="tariffed" checked> Include tariffed</label>
           <label title="Items sold by third-party sellers through DigiKey Marketplace"><input type="checkbox" id="market"> Include marketplace items</label>
+          <span id="filters-saved" class="hint" role="status"></span>
           <span class="spacer"></span>
           <button id="price-go" class="primary">Find cheapest</button>
         </div>
@@ -338,9 +344,16 @@ async function api(path, opts = {}) {
   return data;
 }
 
-function setStatus(msg, isError = false) {
+// Writes a status message into `node`, with a spinning indicator in front when `busy`.
+function paint(node, msg, busy = false) {
+  node.replaceChildren();
+  if (busy) node.append(el("span", { class: "spinner", "aria-hidden": "true" }));
+  node.append(msg || "");
+}
+
+function setStatus(msg, isError = false, busy = false) {
   const s = $("#status");
-  s.textContent = msg || "";
+  paint(s, msg, busy);
   s.className = isError ? "error" : "";
 }
 
@@ -438,7 +451,7 @@ async function loadHistory() {
 
 async function openHistory(id) {
   try {
-    setStatus("Loading…");
+    setStatus("Loading…", false, true);
     const data = await api(`/api/history/${id}`);
     $("#input").value = data.text;
     $("#title").value = data.title;
@@ -451,7 +464,9 @@ async function openHistory(id) {
 async function deleteHistory(id) {
   if (!confirm("Delete this saved circuit?")) return;
   try {
+    setStatus("Deleting…", false, true);
     await api(`/api/history/${id}`, { method: "DELETE" });
+    setStatus("");
     if (currentId === id) currentId = null;
     loadHistory();
   } catch (e) { setStatus(e.message, true); }
@@ -508,7 +523,7 @@ $("#net-go").addEventListener("click", async () => {
   if (!text.trim()) return;
   const b = $("#net-go");
   b.disabled = true;
-  $("#net-status").textContent = "Working…";
+  paint($("#net-status"), "Working…", true);
   try {
     renderNetworks(await api("/api/networks", { method: "POST", body: JSON.stringify({
       text, resistorSeries: $("#net-rs").value, capacitorSeries: $("#net-cs").value, tolerance: Number($("#net-tol").value),
@@ -581,7 +596,7 @@ function renderKicad(d) {
 async function kcCheck() {
   const text = $("#input").value;
   if (!text.trim()) return;
-  $("#kc-status").textContent = "Working…";
+  paint($("#kc-status"), "Working…", true);
   try {
     renderKicad(await api("/api/kicad", { method: "POST", body: JSON.stringify(kcBody(false)) }));
     $("#kc-status").textContent = "";
@@ -597,6 +612,7 @@ $("#kc-decouple").addEventListener("change", () => { if ($("#kc-out").childEleme
 $("#kc-dl").addEventListener("click", async () => {
   const b = $("#kc-dl");
   b.disabled = true;
+  paint($("#kc-status"), "Building KiCad files…", true);
   try {
     const res = await fetch("/api/kicad", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(kcBody(true)) });
     if (!res.ok) { let m = `Request failed (${res.status})`; try { m = (await res.json()).error || m; } catch {} throw new Error(m); }
@@ -604,6 +620,7 @@ $("#kc-dl").addEventListener("click", async () => {
     const a = el("a", { href: url, download: "circuit-kicad.zip" });
     document.body.append(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 5000);
+    $("#kc-status").textContent = "";
   } catch (e) { $("#kc-status").textContent = e.message; } finally { b.disabled = false; }
 });
 
@@ -686,20 +703,62 @@ const money = (n) => {
   return "$" + n.toFixed(n < 1 ? 4 : 2).replace(/(\.\d\d)0+$/, "$1");
 };
 const safeUrl = (u) => (typeof u === "string" && /^https:\/\//i.test(u) ? u : null);
-function setPStatus(msg, isError = false) {
+function setPStatus(msg, isError = false, busy = false) {
   const s = $("#pricing-status");
-  s.textContent = msg || "";
+  paint(s, msg, busy);
   s.className = isError ? "error" : "";
 }
 
 let pkgTouched = false;
 $("#pkg").addEventListener("change", () => { pkgTouched = true; });
 
+// Pricing filters follow the signed-in user: restored when the page loads, saved when changed.
+const FILTER_BOXES = { inStock: "#instock", normallyStocking: "#normally", tariffed: "#tariffed", marketplace: "#market" };
+let filtersAppliedFor = null;
+function applySavedFilters() {
+  if (!me.user) { filtersAppliedFor = null; return; }
+  const who = me.user.email || me.user.name || "user";
+  if (filtersAppliedFor === who) return;
+  filtersAppliedFor = who;
+  for (const [key, sel] of Object.entries(FILTER_BOXES)) {
+    if (me.filters && typeof me.filters[key] === "boolean") $(sel).checked = me.filters[key];
+  }
+}
+
+let filterSaveTimer = null, filterNoteTimer = null;
+function saveFilters() {
+  if (!me.user) return; // signed-out users just use the controls; nothing is stored
+  clearTimeout(filterSaveTimer);
+  filterSaveTimer = setTimeout(async () => {
+    const filters = {};
+    for (const [key, sel] of Object.entries(FILTER_BOXES)) filters[key] = $(sel).checked;
+    if (pkgTouched) filters.package = $("#pkg").value; // only once the user has actually chosen one
+    const note = $("#filters-saved");
+    try {
+      const data = await api("/api/settings", { method: "PUT", body: JSON.stringify({ filters }) });
+      me.filters = data.filters;
+      paint(note, "Saved to your preferences");
+      note.className = "hint";
+    } catch (e) {
+      paint(note, `Couldn't save: ${e.message}`);
+      note.className = "error";
+    }
+    clearTimeout(filterNoteTimer);
+    filterNoteTimer = setTimeout(() => paint(note, ""), 3000);
+  }, 400);
+}
+for (const sel of [...Object.values(FILTER_BOXES), "#pkg"]) $(sel).addEventListener("change", saveFilters);
+
 function updatePricingGate() {
   const ok = Boolean(me.user && me.pricing);
+  applySavedFilters();
   // "My preferences" appears once the user has saved a ranking, and is the default until they pick another.
   $("#pkg option[value=pref]").hidden = !me.hasPreferences;
-  if (me.hasPreferences && !pkgTouched) $("#pkg").value = "pref";
+  if (!pkgTouched) {
+    const want = me.filters && me.filters.package;
+    if (want && (want !== "pref" || me.hasPreferences)) $("#pkg").value = want;
+    else if (me.hasPreferences) $("#pkg").value = "pref";
+  }
   if (!me.hasPreferences && $("#pkg").value === "pref") $("#pkg").value = "tht";
   $("#pricing-controls").hidden = !ok;
   const msg = $("#pricing-msg");
@@ -809,7 +868,7 @@ async function lookupPricing(indexes, overrides = {}) {
   });
   const go = $("#price-go");
   go.disabled = true;
-  setPStatus(indexes.length > 1 ? "Looking up prices…" : "Searching…");
+  setPStatus(indexes.length > 1 ? "Looking up prices…" : "Searching…", false, true);
   try {
     const data = await api("/api/pricing", {
       method: "POST",
@@ -864,9 +923,9 @@ let ordersData = null;   // the page of orders currently shown
 const fmtDate = (s) => { const d = new Date(s); return Number.isNaN(d.getTime()) ? "" : d.toLocaleDateString(); };
 const ymd = (d) => d.toLocaleDateString("en-CA"); // YYYY-MM-DD in the viewer's time zone
 const moneyIn = (n, cur) => (n == null ? "" : !cur || cur === "USD" ? money(n) : `${n.toFixed(2)} ${cur}`);
-function setOStatus(msg, isError = false) {
+function setOStatus(msg, isError = false, busy = false) {
   const s = $("#orders-status");
-  s.textContent = msg || "";
+  paint(s, msg, busy);
   s.className = isError ? "error" : "";
 }
 
@@ -975,7 +1034,7 @@ async function loadOrders(page = 1) {
   if (!start || !end) { setOStatus("Pick a start and end date.", true); return; }
   const go = $("#o-go");
   go.disabled = true;
-  setOStatus("Loading orders…");
+  setOStatus("Loading orders…", false, true);
   try {
     const qs = new URLSearchParams({ start, end, page, shared: $("#o-shared").checked });
     ordersData = await api(`/api/orders?${qs}`);
@@ -1023,7 +1082,7 @@ async function generate() {
   const text = $("#input").value;
   if (!text.trim()) { setStatus("Paste a CircuitJS export first.", true); return; }
   const go = $("#go");
-  go.disabled = true; setStatus("Working…");
+  go.disabled = true; setStatus("Working…", false, true);
   try {
     const title = $("#title").value.trim();
     const data = await api("/api/bom", { method: "POST", body: JSON.stringify({ text, title }) });

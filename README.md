@@ -147,7 +147,7 @@ Then add the deployed URL's `/auth/callback` to the Google client's redirect URI
 | Method | Path | Auth | Description |
 | --- | --- | --- | --- |
 | `POST` | `/api/bom` | optional | Body `{ text, title?, save? }`. Returns `{ count, summary, parts, unknown, id, saved }`. Saves to history when signed in (unless `save: false`). |
-| `GET` / `PUT` | `/api/settings` | yes | Read or save the user's ranked part-type preferences |
+| `GET` / `PUT` | `/api/settings` | yes | Read or save the user's ranked part-type preferences and saved pricing filters |
 | `POST` | `/api/networks` | no | Series/parallel alternatives for non-standard resistor and capacitor values. Body: `{ text, resistorSeries?, capacitorSeries?, tolerance? }` |
 | `POST` | `/api/pricing` | yes | Body `{ items: [{ component, value, details, quantity, query? }], package?, inStock?, boards? }`. Returns the cheapest DigiKey options per line. See below. |
 | `GET` | `/api/orders` | yes | The signed-in user's own DigiKey orders. Query: `start`, `end` (YYYY-MM-DD, default last 30 days), `page`, `pageSize` (max 25), `shared`. `409` with `notConnected: true` if they haven't connected DigiKey. |
@@ -191,7 +191,9 @@ The groups live in `src/brands.js`, and **they are a rough rule of thumb, not a 
 - Fallbacks cost DigiKey requests. A single lookup makes at most 40 searches in total, fallbacks included.
 - Preferences are stored per user in the `user_settings` table. Run `npm run db:init:remote` (and `db:init:local`) once after updating. Until then, saving shows a message asking for that.
 
-API: `GET /api/settings` returns `{ preferences, catalog }`; `PUT /api/settings` with `{ preferences: { mounting: ["smd","tht"], capacitor: ["aluminum","film","ceramic"] } }` saves. Both need sign-in. An empty list means no preference for that category.
+**Pricing filters save automatically.** For signed-in users, the DigiKey controls (In stock only, Usually stocking only, Include tariffed, Include marketplace items, and the **Parts** menu once you've picked one) are saved a moment after you change them and restored the next time you sign in. They are stored in the same `user_settings` row as the rankings, under a `filters` key, so saving one never overwrites the other and no database change is needed. Signed-out use is unchanged and nothing is stored.
+
+API: `GET /api/settings` returns `{ preferences, filters, catalog }`; `PUT /api/settings` with `{ preferences: { mounting: ["smd","tht"], capacitor: ["aluminum","film","ceramic"] } }` and/or `{ filters: { inStock: true, tariffed: false, package: "smd" } }` saves (anything you leave out is unchanged; filters merge over the saved ones). Both need sign-in. An empty list means no preference for that category.
 
 ## Common-value alternatives
 
@@ -261,6 +263,19 @@ Nothing is shared between users. Each person signs in at DigiKey and approves ac
 - Orders are fetched live and never stored. Contact emails, phone numbers and street addresses are stripped in the Worker; the page only gets a name and city/state/country for shipping.
 - **Disconnect** deletes the stored tokens here. It doesn't revoke the authorization on DigiKey's side.
 - DigiKey's rate limits and date-range rules apply. A `429` or a rejected date range is shown as a message.
+
+## CI/CD (GitHub Actions)
+
+`.github/workflows/main.yml` runs the tests on every pull request and every push to `main`. A push to `main` that passes is then deployed to Cloudflare Workers, after applying `schema.sql` to the remote database (it only uses `CREATE ... IF NOT EXISTS`, so that is safe on every deploy). You can also run it by hand from the Actions tab.
+
+**One-time setup** (repository **Settings > Secrets and variables > Actions**):
+
+1. `CLOUDFLARE_ACCOUNT_ID`: your account ID (shown in the Cloudflare dashboard sidebar, or in the `wrangler whoami` output).
+2. `CLOUDFLARE_API_TOKEN`: create one at Cloudflare **My Profile > API Tokens** from the **Edit Cloudflare Workers** template, and add **Account > D1 > Edit** so the schema step can run.
+
+The app's own secrets (Google, DigiKey, `TOKEN_ENCRYPTION_KEY`) are not touched by deploys. Set them once with `npx wrangler secret put`, and they stay on the Worker.
+
+The deploy job uses a GitHub **environment** named `production`. To require someone to approve each deploy, add required reviewers under **Settings > Environments > production**. To turn deploys off, delete the `deploy` job.
 
 ## Adding another sign-in provider
 
