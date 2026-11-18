@@ -9,7 +9,7 @@ import { register, signIn } from "./password.js";
 import { analyse, SERIES } from "./networks.js";
 import { applyBrandRanking } from "./brands.js";
 import { CATALOG, validatePreferences, validateFilters, loadPreferences, loadStored, savePreferences, saveFilters } from "./preferences.js";
-import { candidates } from "./queries.js";
+import { candidates, channelsPerPackage } from "./queries.js";
 import { cheapestOptions } from "./pricing.js";
 import { DigiKeyError, digikeyConfigured, getToken, searchKeyword } from "./digikey.js";
 import {
