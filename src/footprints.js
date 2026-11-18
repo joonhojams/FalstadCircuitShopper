@@ -23,7 +23,7 @@ const SMD_DEFAULT = { resistor: "0805", capacitor: "0805", inductor: "0805" };
 const DEFAULT = {
   resistor:  { tht: "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal" },
   capacitor: { tht: "Capacitor_THT:C_Disc_D5.0mm_W2.5mm_P5.00mm" },
-  inductor:  { tht: "Inductor_THT:L_Axial_L5.3mm_D2.2mm_P10.16mm_Horizontal" },
+  inductor:  { tht: "Inductor_THT:L_Axial_L5.3mm_D2.2mm_P10.16mm_Horizontal_Vishay_IM-1" },
   diode:     { smd: "Diode_SMD:D_SOD-123", tht: "Diode_THT:D_DO-35_SOD27_P7.62mm_Horizontal" },
   led:       { smd: "LED_SMD:LED_0805_2012Metric", tht: "LED_THT:LED_D5.0mm" },
   switch:    { smd: "Button_Switch_THT:SW_PUSH_6mm", tht: "Button_Switch_THT:SW_PUSH_6mm" },
@@ -50,7 +50,7 @@ const DEFAULT_PKG = { smd: "sot-23", tht: { bjt: "to-92", mosfet: "to-220" } };
 // PCB-mount potentiometers by part number family; everything else falls back below.
 const POTS = [
   [/^3296w/i, "Potentiometer_THT:Potentiometer_Bourns_3296W_Vertical"],
-  [/^3296p/i, "Potentiometer_THT:Potentiometer_Bourns_3296P_Vertical"],
+  [/^3296p/i, "Potentiometer_THT:Potentiometer_Bourns_3296P_Horizontal"],
   [/^3296y/i, "Potentiometer_THT:Potentiometer_Bourns_3296Y_Vertical"],
   [/^3386p/i, "Potentiometer_THT:Potentiometer_Bourns_3386P_Vertical"],
   [/^rk09k/i, "Potentiometer_THT:Potentiometer_Alps_RK09K_Single_Vertical"],
@@ -74,13 +74,17 @@ export function resolve(kind, choice, globalMount) {
   if (kind in PREFIX) {
     const P = PREFIX[kind];
     if (mount === "smd") {
-      const size = chipSize(t) ?? SMD_DEFAULT[kind];
-      return out(`${kind === "resistor" ? "Resistor_SMD" : kind === "capacitor" ? "Capacitor_SMD" : "Inductor_SMD"}:${P}_${size}_${CHIP[size]}`, "smd", { fromBom: fromBom && Boolean(chipSize(t)) });
+      let size = chipSize(t) ?? SMD_DEFAULT[kind], warning;
+      if (kind === "capacitor" && (size === "2010" || size === "2512")) {   // KiCad has no capacitor footprint this large
+        warning = `KiCad has no ${size} capacitor footprint; the board uses 1812 (4.5 x 3.2 mm). Swap in the footprint for the part you ordered.`;
+        size = "1812";
+      }
+      return out(`${kind === "resistor" ? "Resistor_SMD" : kind === "capacitor" ? "Capacitor_SMD" : "Inductor_SMD"}:${P}_${size}_${CHIP[size]}`, "smd", { fromBom: fromBom && Boolean(chipSize(t)), ...(warning ? { warning } : {}) });
     }
     if (kind === "capacitor" && /alumin|electrolytic|radial/.test(t)) {
       return out("Capacitor_THT:CP_Radial_D5.0mm_P2.00mm", "tht", { warning: "Electrolytic footprint assumes a 5 mm diameter, 2 mm lead spacing; change it to match the part. Pad 1 is +." });
     }
-    if (kind === "capacitor" && /film|polyprop|polyester/.test(t)) return out("Capacitor_THT:C_Rect_L7.2mm_W2.5mm_P5.00mm", "tht");
+    if (kind === "capacitor" && /film|polyprop|polyester/.test(t)) return out("Capacitor_THT:C_Rect_L7.2mm_W2.5mm_P5.00mm_FKS2_FKP2_MKS2_MKP2", "tht");
     return out(DEFAULT[kind].tht, "tht");
   }
 

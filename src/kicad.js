@@ -8,6 +8,7 @@
 
 import { ICS, icsFor, icFromChoice, defaultIc, packagePins } from "./ics.js";
 import { resolve, icFootprint } from "./footprints.js";
+import { missingFootprints, placeParts, writePcb, previewBoard } from "./pcb.js";
 
 const q = (s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 const n = (x) => Number(x.toFixed(3));
@@ -17,7 +18,7 @@ const FONT_HIDE = "(effects (font (size 1.27 1.27)) (hide yes))";
 export const FOOTPRINTS = {
   resistor:  { smd: "Resistor_SMD:R_0805_2012Metric", tht: "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal" },
   capacitor: { smd: "Capacitor_SMD:C_0805_2012Metric", tht: "Capacitor_THT:C_Disc_D5.0mm_W2.5mm_P5.00mm" },
-  inductor:  { smd: "Inductor_SMD:L_0805_2012Metric", tht: "Inductor_THT:L_Axial_L5.3mm_D2.2mm_P10.16mm_Horizontal" },
+  inductor:  { smd: "Inductor_SMD:L_0805_2012Metric", tht: "Inductor_THT:L_Axial_L5.3mm_D2.2mm_P10.16mm_Horizontal_Vishay_IM-1" },
   diode:     { smd: "Diode_SMD:D_SOD-123", tht: "Diode_THT:D_DO-35_SOD27_P7.62mm_Horizontal" },
   led:       { smd: "LED_SMD:LED_0805_2012Metric", tht: "LED_THT:LED_D5.0mm" },
   switch:    { smd: "Button_Switch_THT:SW_PUSH_6mm", tht: "Button_Switch_THT:SW_PUSH_6mm" },
@@ -241,8 +242,9 @@ export function buildProject(netlist, opts = {}) {
       (property "Value" ${q(it.value)} (at ${n(x)} ${n(y + hh + 1.27)} 0) ${FONT})
       (property "Footprint" ${q(it.footprint)} (at ${n(x)} ${n(y)} 0) ${FONT_HIDE})
       (property "Datasheet" "" (at ${n(x)} ${n(y)} 0) ${FONT_HIDE})`;
+    it.symUuid = uuid();            // the PCB footprint points back at this symbol
     out.push(`  (symbol (lib_id ${q(`CJS:${def.id}`)}) (at ${n(x)} ${n(y)} 0) (unit 1)
-    (exclude_from_sim no) (in_bom yes) (on_board yes) (dnp no) (uuid ${q(uuid())})${props}
+    (exclude_from_sim no) (in_bom yes) (on_board yes) (dnp no) (uuid ${q(it.symUuid)})${props}
 ${it.pins.map((p) => `    (pin ${q(p.num)} (uuid ${q(uuid())}))`).join("\n")}
     (instances (project ${q(name)} (path ${q(`/${root}`)} (reference ${q(it.ref)}) (unit 1)))))`);
 
@@ -285,5 +287,21 @@ ${noConnects.map((c) => `  (no_connect (at ${c.x} ${c.y}) (uuid ${q(uuid())}))`)
     rails: netlist.rails,
     nets: netlist.nets.length,
   };
-  return { ok: true, files: { [`${name}.kicad_sch`]: sch, [`${name}.kicad_pro`]: pro }, summary, warnings, labels };
+  const files = { [`${name}.kicad_sch`]: sch, [`${name}.kicad_pro`]: pro };
+
+  // Placed (not routed) board. Needs real footprint geometry for every part; otherwise the user
+  // starts the board from the schematic in KiCad as before and the preview uses a rough layout.
+  let pcb = null, layout = null;
+  const missing = missingFootprints(items);
+  if (missing.length) {
+    warnings.push(`No .kicad_pcb was written because footprint geometry is not built in for: ${missing.map((m) => m.split(":").pop()).join(", ")}. Use Update PCB from Schematic (F8) in KiCad.`);
+  } else {
+    layout = placeParts(items);
+    warnings.push(...layout.warnings);
+    const w = writePcb({ name, layout, uuid, sheetFile: `${name}.kicad_sch` });
+    files[`${name}.kicad_pcb`] = w.text;
+    pcb = previewBoard(layout);
+    summary.board = { width: layout.w, height: layout.l, nets: w.nets };
+  }
+  return { ok: true, files, summary, warnings, labels, pcb, layout };
 }
