@@ -481,7 +481,11 @@ const kicadReadme = (b) => `KiCad project generated from a CircuitJS circuit.
    Choose Tools > Update PCB from Schematic (F8) once to confirm it matches the schematic.${b.summary.board.routed ? "\n   Press B (Fill all zones) so the ground pour appears; the zones are saved unfilled." : ""}` : "Choose Tools > Update PCB from Schematic (F8) to bring in the parts."}
 4. ${b.summary.board ? (b.summary.board.routed ? "Check and finish the routing (any net left unrouted shows as a ratsnest line)" : "Adjust the placement, route (Route > Interactive Router, or Freerouting with the .dsn file)") : "Place, route"}, run Design Rules Check (it uses ${b.summary.name}.kicad_dru and the net classes in the project), then plot Gerbers.
 
-Nets are connected by name labels on every pin. Footprints are KiCad standard-library
+${b.summary.board ? `To autoroute with Freerouting instead: open ${b.summary.name}.dsn in Freerouting, route, export the session (.ses), then in KiCad use File > Import > Specctra Session.
+The .dsn carries the same net classes (widths and clearances) and via size; the ground nets are routed as traces there, so delete the ground zone first if you want traces instead of a pour.
+Check the result with DRC before ordering: an autorouter does not know the audio-layout rules.
+
+` : ""}Nets are connected by name labels on every pin. Footprints are KiCad standard-library
 names (${b.summary.mounting === "tht" ? "through-hole" : "surface-mount"}); change them in the schematic if you want other sizes.
 Check transistor/MOSFET pinouts and IC pinouts against the datasheet of the exact parts before ordering.
 

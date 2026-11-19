@@ -8,6 +8,7 @@
 
 import { ICS, icsFor, icFromChoice, defaultIc, packagePins } from "./ics.js";
 import { resolve, icFootprint } from "./footprints.js";
+import { writeDsn } from "./dsn.js";
 import { missingFootprints, placeParts, writePcb, previewBoard } from "./pcb.js";
 import { routeBoard } from "./route.js";
 import { checkBoard, trackLengths } from "./drc.js";
@@ -328,6 +329,7 @@ ${noConnects.map((c) => `  (no_connect (at ${c.x} ${c.y}) (uuid ${q(uuid())}))`)
     }
     const w = writePcb({ name, layout, uuid, sheetFile: `${name}.kicad_sch`, routed });
     files[`${name}.kicad_pcb`] = w.text;
+    files[`${name}.dsn`] = writeDsn({ name, layout, rules, byNet: cls.byNet });   // for Freerouting
     pcb = previewBoard(layout, routed);
     summary.board = { width: layout.w, height: layout.l, nets: w.nets, routed: Boolean(routed) };
   }

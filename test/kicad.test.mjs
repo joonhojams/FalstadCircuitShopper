@@ -500,3 +500,54 @@ test("through-hole boards sit on the 1.27 mm placement grid with the origin on t
   const outline = kids(parseSexp(smd.files["circuit.kicad_pcb"]), "gr_arc");
   assert.equal(outline.length, 4, "rounded corners, radius at least 1 mm");
 });
+
+// ---- Specctra DSN (Freerouting) ----
+import { parseSexp as parseDsn } from "../scripts/sexp.mjs";
+
+test(".dsn is well formed and carries every placed pad, net and net class", () => {
+  const r = ampBuild();
+  const dsn = r.files["amp.dsn"];
+  assert.ok(dsn, "the zip carries a .dsn");
+  const t = parseDsn(dsn);
+  assert.equal(t[0], "pcb");
+  const structure = kid(t, "structure");
+  assert.equal(kids(structure, "layer").length, 2);
+  const boundary = kid(kid(structure, "boundary"), "path");
+  assert.deepEqual(boundary.slice(3).map(Number), [0, 0, r.layout.w * 1000, 0, r.layout.w * 1000, -r.layout.l * 1000, 0, -r.layout.l * 1000, 0, 0]);
+
+  const comps = kids(kid(t, "placement"), "component");
+  assert.equal(comps.length, r.layout.parts.length);
+  const images = new Map(kids(kid(t, "library"), "image").map((i) => [i[1], kids(i, "pin")]));
+  for (const c of comps) {
+    const place = kid(c, "place");
+    const part = r.layout.parts.find((p) => p.it.ref === place[1]);
+    assert.equal(Number(place[2]), Math.round(part.x * 1000));
+    assert.equal(Number(place[3]), -Math.round(part.y * 1000));
+    assert.equal(images.get(c[1]).length, part.pads.length, `${place[1]} pads`);
+  }
+  // every pad of every multi-pad net is listed once, under the name the .kicad_pcb uses
+  const want = new Map();
+  for (const p of r.layout.parts) for (const d of p.pads) if (d.net) (want.get(d.net) ?? want.set(d.net, []).get(d.net)).push(`${p.it.ref}-${d.n}`);
+  const got = new Map(kids(kid(t, "network"), "net").map((n) => [n[1], kid(n, "pins").slice(1)]));
+  for (const [net, pins] of want) {
+    if (pins.length < 2) { assert.ok(!got.has(`/${net}`), `${net} has one pad and is left out`); continue; }
+    assert.deepEqual([...got.get(`/${net}`)].sort(), pins.sort(), net);
+  }
+  // each net sits in exactly one class, and the class widths match the project rules
+  const seen = new Set();
+  for (const cl of kids(kid(t, "network"), "class")) {
+    const w = Number(kid(kid(cl, "rule"), "width")[1]);
+    assert.equal(w, Math.round(r.rules.classes[cl[1]].track * 1000), `${cl[1]} width`);
+    for (const n of cl.slice(2).filter((x) => typeof x === "string")) { assert.ok(!seen.has(n), `${n} in two classes`); seen.add(n); }
+  }
+  assert.deepEqual([...seen].sort(), [...got.keys()].sort());
+  // the via named in the structure has a padstack
+  const via = kid(structure, "via")[1];
+  assert.ok(kids(kid(t, "library"), "padstack").some((p) => p[1] === via), "via padstack exists");
+});
+
+test("the zip carries the .dsn and the README explains how to use it", () => {
+  const r = ampBuild();
+  const bytes = new TextDecoder("latin1").decode(zip(r.files));
+  assert.ok(bytes.includes("amp.dsn"));
+});
