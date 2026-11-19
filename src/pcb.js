@@ -12,10 +12,15 @@
 import { FOOTPRINT_DATA } from "./footprint-data.js";
 import { bodyFor } from "./board.js";
 
-const STEP = 0.5;          // placement grid, mm
-const SEARCH = 1;          // spacing of candidate positions around a target, mm (a multiple of STEP)
-const GAP = 0.3;           // minimum space between courtyards, mm
-const MARGIN = 3;          // board edge to the nearest courtyard, mm
+// Placement settings per mounting style, mm. STEP is the placement grid (the spec's fine grid 1.27 for
+// through-hole, 0.5 for SMD), SEARCH the spacing of candidate positions around a target (a multiple of
+// STEP), GAP the space kept between courtyards for traces to pass, MARGIN the board edge to the nearest
+// courtyard (spec comp_to_edge 2.0 / 1.5 plus the courtyard's own 0.25-0.5).
+const CFG = {
+  tht: { STEP: 1.27, SEARCH: 2.54, GAP: 1.27, MARGIN: 2.5 },
+  smd: { STEP: 0.5, SEARCH: 1, GAP: 1.5, MARGIN: 2 },
+};
+export const CORNER_RADIUS = 1.0;      // spec board_corner_radius_min
 const R4 = (v) => Math.round(v * 10000) / 10000;
 const q = (s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 
@@ -55,7 +60,8 @@ function oriented(fpName, rot) {
   const fp = FOOTPRINT_DATA[fpName];
   const pads = fp.pads.map((p) => {
     const [x, y] = rotPt(p.x, p.y, rot);
-    return { n: p.n, x, y, w: swap(rot) ? p.h : p.w, h: swap(rot) ? p.w : p.h };
+    const turned = swap(rot + (p.r ?? 0));            // the pad's own rotation counts too
+    return { n: p.n, x, y, w: turned ? p.h : p.w, h: turned ? p.w : p.h, t: p.t, s: p.s, d: p.d, l: p.l };
   });
   return { pads, cy: rotBox(fp.cy, rot), body: rotBox(bodyBox(fp), rot) };
 }
@@ -64,7 +70,9 @@ function oriented(fpName, rot) {
  * @param {{ref: string, footprint: string, pins: {num: string, net: string|null}[]}[]} items
  * @returns {{parts: object[], w: number, l: number, warnings: string[]}}
  */
-export function placeParts(items) {
+export function placeParts(items, opts = {}) {
+  const mounting = opts.mounting === "tht" ? "tht" : "smd";
+  const { STEP, SEARCH, GAP, MARGIN } = CFG[mounting];
   const warnings = [];
   const info = new Map();                     // item -> per-pad net, by pad number
   for (const it of items) {
@@ -181,7 +189,7 @@ export function placeParts(items) {
     r.body = r.body.map((v, i) => R4(v + (i % 2 ? dy : dx)));
     for (const p of r.pads) { p.x = R4(p.x + dx); p.y = R4(p.y + dy); }
   }
-  return { parts: placed, w: Math.max(w, 10), l: Math.max(l, 10), warnings };
+  return { parts: placed, w: Math.max(w, 10), l: Math.max(l, 10), mounting, warnings };
 }
 
 /** Ratsnest: a minimum spanning tree over each net's pads, as [x1, y1, x2, y2]. */
@@ -204,9 +212,14 @@ export function airwires(parts) {
 }
 
 /** What the 3D preview draws: the same placement, with bodies sized from the footprints. */
-export function previewBoard(layout) {
+export function previewBoard(layout, routed = null) {
   return {
     real: true, w: layout.w, l: layout.l, thickness: 1.6,
+    ...(routed ? {
+      routed: true,
+      tracks: routed.tracks.map((t) => [t.layer, t.x1, t.y1, t.x2, t.y2, t.w]),
+      vias: routed.vias.map((v) => [v.x, v.y, routed.viaPad]),
+    } : {}),
     parts: layout.parts.map((r) => {
       const b = bodyFor(r.it.footprint, r.it.ref);
       const bw = r.body[2] - r.body[0], bl = r.body[3] - r.body[1];
@@ -249,18 +262,35 @@ const LAYERS = `  (layers
 const FONT = "(effects (font (size 1 1) (thickness 0.15)))";
 const stroke = (w) => `(stroke (width ${R4(w || 0.12)}) (type solid))`;
 
+/** Edge.Cuts: a rectangle with rounded corners (lines and 90 degree arcs). */
+function outline(w, l, X, Y, uuid) {
+  const r = CORNER_RADIUS, k = r * (1 - Math.SQRT1_2);
+  const st = `(stroke (width 0.05) (type default)) (layer "Edge.Cuts")`;
+  const line = (x1, y1, x2, y2) => `  (gr_line (start ${X(x1)} ${Y(y1)}) (end ${X(x2)} ${Y(y2)}) ${st} (uuid ${q(uuid())}))`;
+  const arc = (sx, sy, mx, my, ex, ey) => `  (gr_arc (start ${X(sx)} ${Y(sy)}) (mid ${X(mx)} ${Y(my)}) (end ${X(ex)} ${Y(ey)}) ${st} (uuid ${q(uuid())}))`;
+  return [
+    line(r, 0, w - r, 0), arc(w - r, 0, w - k, k, w, r),
+    line(w, r, w, l - r), arc(w, l - r, w - k, l - k, w - r, l),
+    line(w - r, l, r, l), arc(r, l, k, l - k, 0, l - r),
+    line(0, l - r, 0, r), arc(0, r, k, k, r, 0),
+  ].join("\n");
+}
+
 /**
- * @param {{name: string, items: object[], layout: ReturnType<typeof placeParts>, uuid: () => string, sheetFile: string}} a
+ * @param {{name: string, items: object[], layout: ReturnType<typeof placeParts>, uuid: () => string, sheetFile: string,
+ *   routed?: {tracks: object[], vias: object[], via: {pad: number, drill: number}, gndNets: string[], clearance: number}}} a
  *   items[].symUuid is the schematic symbol's UUID, so Update PCB from Schematic keeps the link.
+ *   `routed` adds the tracks and vias, and a ground zone on both layers for each net in gndNets.
  */
-export function writePcb({ name, layout, uuid, sheetFile }) {
+export function writePcb({ name, layout, uuid, sheetFile, routed }) {
   // Net names follow what KiCad gives a local label on the root sheet: "/NAME".
   const netId = new Map();
   for (const r of layout.parts) for (const p of r.pads) if (p.net && !netId.has(p.net)) netId.set(p.net, netId.size + 1);
   const netName = (n) => `/${n}`;
 
   const paper = layout.w <= 270 && layout.l <= 190 ? ["A4", 297, 210] : layout.w <= 390 && layout.l <= 270 ? ["A3", 420, 297] : ["A2", 594, 420];
-  const ox = Math.round((paper[1] - layout.w) / 2), oy = Math.round((paper[2] - layout.l) / 2);
+  const snapTo = layout.mounting === "tht" ? 2.54 : 1;
+  const ox = R4(Math.round((paper[1] - layout.w) / 2 / snapTo) * snapTo), oy = R4(Math.round((paper[2] - layout.l) / 2 / snapTo) * snapTo);
   const X = (v) => R4(v + ox), Y = (v) => R4(v + oy);
 
   const fps = layout.parts.map((r) => {
@@ -286,7 +316,8 @@ export function writePcb({ name, layout, uuid, sheetFile }) {
       const drill = p.d === undefined ? "" : Array.isArray(p.d) ? ` (drill oval ${p.d[0]} ${p.d[1]})` : ` (drill ${p.d})`;
       const rr = p.s === "roundrect" ? ` (roundrect_rratio ${p.rr ?? 0.25})` : "";
       const netTxt = net ? ` (net ${netId.get(net)} ${q(netName(net))})` : "";
-      return `    (pad ${q(p.n)} ${p.t} ${p.s} (at ${p.x} ${p.y}${ang ? ` ${ang}` : ""}) (size ${p.w} ${p.h})${drill} (layers ${p.l.map(q).join(" ")})${rr}${netTxt} (uuid ${q(uuid())}))`;
+      const solid = routed && net && routed.gndNets.includes(net) && p.t === "smd" ? " (zone_connect 2)" : "";      // LS-03: surface-mount ground pads solid, through-hole ones thermal
+      return `    (pad ${q(p.n)} ${p.t} ${p.s} (at ${p.x} ${p.y}${ang ? ` ${ang}` : ""}) (size ${p.w} ${p.h})${drill} (layers ${p.l.map(q).join(" ")})${rr}${solid}${netTxt} (uuid ${q(uuid())}))`;
     });
     const model = fp.model
       ? `\n    (model ${q(`\${KICAD9_3DMODEL_DIR}/${fp.model.p}.step`)} (offset (xyz ${fp.model.o.join(" ")})) (scale (xyz ${fp.model.s.join(" ")})) (rotate (xyz ${fp.model.r.join(" ")})))`
@@ -303,6 +334,22 @@ ${pads.join("\n")}
   )`;
   });
 
+  const layerName = (i) => (i ? "B.Cu" : "F.Cu");
+  const copper = routed ? [
+    ...routed.tracks.map((t) => `  (segment (start ${X(t.x1)} ${Y(t.y1)}) (end ${X(t.x2)} ${Y(t.y2)}) (width ${t.w}) (layer ${q(layerName(t.layer))}) (net ${netId.get(t.net)}) (uuid ${q(uuid())}))`),
+    ...routed.vias.map((v) => `  (via (at ${X(v.x)} ${Y(v.y)}) (size ${routed.via.pad}) (drill ${routed.via.drill}) (layers "F.Cu" "B.Cu") (net ${netId.get(v.net)}) (uuid ${q(uuid())}))`),
+    // Pour on both layers, inset from the rounded outline; not filled in the file, so press B (Fill all zones) in KiCad.
+    ...routed.gndNets.filter((n) => netId.has(n)).map((n) => {
+      const d = 0.6, x0 = X(d), y0 = Y(d), x1 = X(layout.w - d), y1 = Y(layout.l - d);
+      return `  (zone (net ${netId.get(n)}) (net_name ${q(netName(n))}) (layers "F.Cu" "B.Cu") (uuid ${q(uuid())}) (hatch edge 0.5)
+    (connect_pads (clearance ${routed.clearance}))
+    (min_thickness 0.25)
+    (filled_areas_thickness no)
+    (fill yes (thermal_gap ${routed.thermalGap}) (thermal_bridge_width ${routed.thermalSpoke}))
+    (polygon (pts (xy ${x0} ${y0}) (xy ${x1} ${y0}) (xy ${x1} ${y1}) (xy ${x0} ${y1}))))`;
+    }),
+  ].join("\n") : "";
+
   const text = `(kicad_pcb
   (version 20241229)
   (generator "circuitjs-bom")
@@ -314,7 +361,7 @@ ${LAYERS}
   (net 0 "")
 ${[...netId].map(([n, id]) => `  (net ${id} ${q(netName(n))})`).join("\n")}
 ${fps.join("\n")}
-  (gr_rect (start ${X(0)} ${Y(0)}) (end ${X(layout.w)} ${Y(layout.l)}) (stroke (width 0.05) (type default)) (fill no) (layer "Edge.Cuts") (uuid ${q(uuid())}))
+${copper ? copper + "\n" : ""}${outline(layout.w, layout.l, X, Y, uuid)}
   (embedded_fonts no)
 )
 `;

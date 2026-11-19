@@ -247,6 +247,7 @@
       <div class="row">
         <label>Parts <select id="kc-mount"><option value="">Choose…</option><option value="smd">Surface-mount</option><option value="tht">Through-hole</option></select></label>
         <label><input type="checkbox" id="kc-decouple" checked> 100 nF decoupling cap per IC</label>
+        <label title="Runs the built-in router: traces on both layers, a ground pour on both, and a self-check. Takes a few seconds on bigger boards."><input type="checkbox" id="kc-route"> Route traces</label>
         <button id="kc-go">Check circuit</button>
       </div>
       <div id="kc-status" class="hint" style="margin-top:8px"></div>
@@ -590,7 +591,16 @@ function boardFaces(board) {
     if (p.shape === "cyl") cyl(p.x, p.y, p.w, 0, p.h, color, i);
     else box(p.x, p.y, p.w, p.l, 0, p.h, color, i);
   });
-  for (const a of board.air || []) lines.push([[a[0] - ox, 0.06, a[1] - oz], [a[2] - ox, 0.06, a[3] - oz]]);
+  for (const a of board.air || []) lines.push({ kind: "air", a: [a[0] - ox, 0.06, a[1] - oz], b: [a[2] - ox, 0.06, a[3] - oz] });
+  for (const [L, x1, y1, x2, y2, w] of board.tracks || []) {
+    if (L) { lines.push({ kind: "bottom", a: [x1 - ox, -0.05, y1 - oz], b: [x2 - ox, -0.05, y2 - oz], w }); continue; }
+    const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy) || 1, nx = (-dy / len) * (w / 2), ny = (dx / len) * (w / 2);
+    faces.push({ pts: [[x1 + nx - ox, 0.05, y1 + ny - oz], [x2 + nx - ox, 0.05, y2 + ny - oz], [x2 - nx - ox, 0.05, y2 - ny - oz], [x1 - nx - ox, 0.05, y1 - ny - oz]], n: [0, 1, 0], color: "#d97706", part: -2 });
+  }
+  for (const [x, y, d] of board.vias || []) {
+    const pts = Array.from({ length: 8 }, (_, i) => [x - ox + (d / 2) * Math.cos((i / 8) * Math.PI * 2), 0.07, y - oz + (d / 2) * Math.sin((i / 8) * Math.PI * 2)]);
+    faces.push({ pts, n: [0, 1, 0], color: "#e5e7eb", part: -2 });
+  }
   return { faces, lines };
 }
 let pcbCleanup = null;
@@ -603,6 +613,8 @@ function mountBoardViewer(host, board) {
   labelsBox.checked = board.parts.length <= 40;
   const airBox = el("input", { type: "checkbox", id: "pcb-air" });
   airBox.checked = true;
+  const botBox = el("input", { type: "checkbox", id: "pcb-bottom" });
+  botBox.checked = true;
   const view = { yaw: -0.6, pitch: 0.7, zoom: 1 };
   const reset = () => Object.assign(view, { yaw: -0.6, pitch: 0.7, zoom: 1 });
   host.append(
@@ -611,9 +623,10 @@ function mountBoardViewer(host, board) {
         el("button", { onclick: () => { reset(); draw(); } }, "Reset view"),
         el("button", { onclick: () => { Object.assign(view, { yaw: 0, pitch: Math.PI / 2 - 0.001 }); draw(); } }, "Top"),
         el("label", {}, labelsBox, " Labels"),
-        ...(lines.length ? [el("label", { title: "Straight lines between pads that share a net; traces are not routed yet" }, airBox, " Connections")] : []),
+        ...(lines.some((l) => l.kind === "air") ? [el("label", { title: "Straight lines between pads that share a net and are not routed" }, airBox, " Unrouted")] : []),
+        ...(lines.some((l) => l.kind === "bottom") ? [el("label", { title: "Bottom-layer traces, drawn through the board" }, botBox, " Bottom layer")] : []),
         info,
-        el("span", { class: "muted" }, `${board.w} × ${board.l} mm · ${board.real ? "auto-placed, not routed" : "illustrative layout"}`))));
+        el("span", { class: "muted" }, `${board.w} × ${board.l} mm · ${board.routed ? "auto-placed and routed (top copper orange, bottom blue)" : board.real ? "auto-placed, not routed" : "illustrative layout"}`))));
   const ctx = canvas.getContext("2d");
   let hits = [], hover = -1, raf = 0;
   const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
@@ -643,12 +656,17 @@ function mountBoardViewer(host, board) {
     const rank = (p) => (p === -1 ? 0 : p === -2 ? 1 : 2);       // board, then pads, then part bodies far to near
     drawn.sort((a, b) => rank(a.fc.part) - rank(b.fc.part) || b.depth - a.depth);
     const proj = (pt) => { const t = tf(pt), d = dist - t[2]; return [W / 2 + (f * t[0]) / d, H * 0.5 - (f * t[1]) / d]; };
-    let linesDone = !airBox.checked || !lines.length;
+    let linesDone = !lines.length;
     const drawLines = () => {
       linesDone = true;
-      ctx.strokeStyle = "#7dd3fc"; ctx.lineWidth = 1.25; ctx.beginPath();
-      for (const [a, b] of lines) { const p0 = proj(a), p1 = proj(b); ctx.moveTo(p0[0], p0[1]); ctx.lineTo(p1[0], p1[1]); }
-      ctx.stroke();
+      for (const ln of lines) {
+        if (ln.kind === "air" ? !airBox.checked : !botBox.checked) continue;
+        const p0 = proj(ln.a), p1 = proj(ln.b);
+        ctx.beginPath(); ctx.moveTo(p0[0], p0[1]); ctx.lineTo(p1[0], p1[1]);
+        if (ln.kind === "air") { ctx.strokeStyle = "#7dd3fc"; ctx.lineWidth = 1.25; }
+        else { ctx.strokeStyle = "rgba(59,130,246,.7)"; ctx.lineWidth = Math.max(1.2, ln.w * f / (dist * 1.0)); }
+        ctx.stroke();
+      }
     };
     hits = [];
     for (const { fc, pts, n } of drawn) {
@@ -717,6 +735,7 @@ function mountBoardViewer(host, board) {
   canvas.addEventListener("wheel", (e) => { e.preventDefault(); view.zoom = Math.max(0.4, Math.min(6, view.zoom * Math.exp(-e.deltaY * 0.0015))); redraw(); }, { passive: false });
   labelsBox.addEventListener("change", redraw);
   airBox.addEventListener("change", redraw);
+  botBox.addEventListener("change", redraw);
   const ro = new ResizeObserver(redraw);
   ro.observe(canvas);
   const mq = matchMedia("(prefers-color-scheme: dark)");
@@ -743,7 +762,7 @@ function kcChoices() {
   return out;
 }
 const kcBody = (download) => ({
-  text: $("#input").value, mounting: $("#kc-mount").value, decouple: $("#kc-decouple").checked,
+  text: $("#input").value, mounting: $("#kc-mount").value, decouple: $("#kc-decouple").checked, route: $("#kc-route").checked,
   ics: kcPicks, choices: kcChoices(), download, name: (document.querySelector("#result-title")?.textContent || "circuit").replace(/^Parts list\s*·?\s*/, "") || "circuit",
 });
 function resetKicad() {
@@ -778,6 +797,13 @@ function renderKicad(d) {
   for (const u of d.unsupported) box.append(el("p", { class: "hint", style: "color:var(--danger)" }, `Can't be placed on a board yet: ${u.name} ×${u.count}`));
   for (const e of d.errors) box.append(el("p", { class: "hint", style: "color:var(--danger)" }, e));
   if (d.board) { const host = el("div", {}); box.append(host); mountBoardViewer(host, d.board); }
+  if (d.routing) {
+    const r = d.routing, bad = r.check.violationCount + r.check.opens.length;
+    box.append(el("p", { class: "hint", style: bad || r.failures.length ? "color:var(--danger)" : "" },
+      `Routed ${r.routedNets} of ${r.totalNets} nets · ${r.tracks} tracks, ${r.vias} vias · built-in check: ${bad ? `${r.check.violationCount} problem(s), ${r.check.opens.length} open net(s)` : "clean"}. Ground is a pour on both layers; fill it in KiCad (B) and run its DRC.`));
+    const rows = [...r.failures.map((f) => `${f.net} → ${f.to}: ${f.reason}`), ...r.check.violations.map((v) => `${v.type}${v.layer ? ` (${v.layer})` : ""}: ${v.a ? `${v.a} / ${v.b}, ${v.gap} mm (need ${v.need})` : v.detail}`), ...r.check.opens.map((o) => `open: ${o.net} in ${o.pieces} pieces`)];
+    if (rows.length) box.append(el("details", {}, el("summary", {}, `${rows.length} routing issue(s)`), el("ul", {}, ...rows.map((t) => el("li", {}, t)))));
+  }
   if (d.warnings.length) box.append(el("details", {}, el("summary", {}, `${d.warnings.length} warning(s)`), el("ul", {}, ...d.warnings.map((w) => el("li", {}, w)))));
   if (d.summary) {
     box.append(el("details", {}, el("summary", {}, `${d.summary.parts.length} board parts`),
@@ -808,6 +834,7 @@ async function kcCheck() {
 $("#kc-go").addEventListener("click", kcCheck);
 $("#kc-mount").addEventListener("change", () => { if ($("#kc-out").childElementCount) kcCheck(); });
 $("#kc-decouple").addEventListener("change", () => { if ($("#kc-out").childElementCount) kcCheck(); });
+$("#kc-route").addEventListener("change", () => { if ($("#kc-out").childElementCount) kcCheck(); });
 $("#kc-dl").addEventListener("click", async () => {
   const b = $("#kc-dl");
   b.disabled = true;

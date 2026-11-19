@@ -439,6 +439,7 @@ async function handleKicad(req) {
     ics: body.ics && typeof body.ics === "object" ? body.ics : {},
     supply: body.supply && typeof body.supply === "object" ? body.supply : undefined,
     decouple: body.decouple !== false,
+    route: body.route === true,
     ignoreUnsupported: body.ignoreUnsupported === true,
     choices: cleanChoices(body.choices),
   };
@@ -460,6 +461,7 @@ async function handleKicad(req) {
       errors: built.ok ? [] : built.errors,
       summary: built.ok ? built.summary : null,
       board: built.ok ? (built.pcb ?? layoutBoard(built.summary.parts)) : null,
+      routing: built.ok ? built.routing : null,
     });
   }
   if (!built.ok) return json({ error: built.errors.join(" ") , errors: built.errors }, 422);
@@ -475,9 +477,9 @@ const kicadReadme = (b) => `KiCad project generated from a CircuitJS circuit.
 
 1. Unzip, open ${b.summary.name}.kicad_pro in KiCad 9.
 2. Open the schematic and run Inspect > Electrical Rules Check.
-3. Open the PCB editor. ${b.summary.board ? `The board already holds every footprint, placed automatically inside a ${b.summary.board.width} x ${b.summary.board.height} mm outline, with its nets assigned and no traces drawn.
-   Choose Tools > Update PCB from Schematic (F8) once to confirm it matches the schematic.` : "Choose Tools > Update PCB from Schematic (F8) to bring in the parts."}
-4. ${b.summary.board ? "Adjust the placement, route (Route > Interactive Router, or an autorouter plugin such as Freerouting)" : "Place, route"}, run Design Rules Check, then plot Gerbers.
+3. Open the PCB editor. ${b.summary.board ? `The board already holds every footprint, placed automatically inside a ${b.summary.board.width} x ${b.summary.board.height} mm outline, with its nets assigned${b.summary.board.routed ? ", the traces and vias the built-in router found, and a ground zone on both layers" : " and no traces drawn"}.
+   Choose Tools > Update PCB from Schematic (F8) once to confirm it matches the schematic.${b.summary.board.routed ? "\n   Press B (Fill all zones) so the ground pour appears; the zones are saved unfilled." : ""}` : "Choose Tools > Update PCB from Schematic (F8) to bring in the parts."}
+4. ${b.summary.board ? (b.summary.board.routed ? "Check and finish the routing (any net left unrouted shows as a ratsnest line)" : "Adjust the placement, route (Route > Interactive Router, or Freerouting with the .dsn file)") : "Place, route"}, run Design Rules Check (it uses ${b.summary.name}.kicad_dru and the net classes in the project), then plot Gerbers.
 
 Nets are connected by name labels on every pin. Footprints are KiCad standard-library
 names (${b.summary.mounting === "tht" ? "through-hole" : "surface-mount"}); change them in the schematic if you want other sizes.

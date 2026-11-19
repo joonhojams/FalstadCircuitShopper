@@ -94,7 +94,7 @@ test("op-amps pack into dual packages with supply, decoupling and a single power
   assert.ok(r.ok, r.errors?.join());
   const refs = r.summary.parts.map((p) => p.ref);
   assert.deepEqual(refs.filter((x) => x.startsWith("U")), ["U1", "U3"]);
-  assert.ok(refs.includes("J1") && refs.filter((x) => x.startsWith("C_DEC")).length === 2);
+  assert.ok(refs.includes("J1") && r.summary.parts.filter((x) => x.kind === "decoupling").length === 2);
   assert.deepEqual(r.summary.supplyNets, ["+5V", "GND"]);
   assert.ok(r.warnings.some((w) => /spare channel/.test(w)));
   const sch = r.files["circuit.kicad_sch"];
@@ -370,9 +370,11 @@ test(".kicad_pcb is well formed, links to the schematic symbols and carries the 
 test("placement keeps courtyards apart and inside the board outline, with J1 on the left edge", () => {
   const r = ampBuild();
   const pcb = parseSexp(r.files["amp.kicad_pcb"]);
-  const rect = kid(pcb, "gr_rect");
-  const [x0, y0] = kid(rect, "start").slice(1).map(Number), [x1, y1] = kid(rect, "end").slice(1).map(Number);
-  assert.equal(kid(rect, "layer")[1], "Edge.Cuts");
+  const edge = [...kids(pcb, "gr_line"), ...kids(pcb, "gr_arc")];
+  assert.equal(edge.length, 8, "four sides and four rounded corners");
+  assert.ok(edge.every((e) => kid(e, "layer")[1] === "Edge.Cuts"));
+  const xs = edge.flatMap((e) => [kid(e, "start"), kid(e, "end")].map((p) => Number(p[1]))), ys = edge.flatMap((e) => [kid(e, "start"), kid(e, "end")].map((p) => Number(p[2])));
+  const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
   assert.ok(r.pcb.real && r.pcb.w === x1 - x0 && r.pcb.l === y1 - y0, "preview size equals the outline");
 
   const layout = r.layout;
@@ -392,7 +394,7 @@ test("decoupling capacitors land next to their IC", () => {
     return Math.hypot(a.x - b.x, a.y - b.y);
   };
   const first = r.summary.packages[0];
-  const cap = r.summary.parts.find((p) => p.ref.startsWith("C_DEC")).ref;
+  const cap = r.summary.parts.find((p) => p.kind === "decoupling").ref;
   assert.ok(near(first.ref, cap) < 9, `${cap} is ${near(first.ref, cap).toFixed(1)} mm from ${first.ref}`);
 });
 
@@ -414,4 +416,87 @@ test("a capacitor size KiCad does not have falls back with a warning", () => {
   const c = resolve("capacitor", { package: "2512", mounting: "Surface Mount" }, "smd");
   assert.equal(c.footprint, "Capacitor_SMD:C_1812_4532Metric");
   assert.match(c.warning, /no 2512 capacitor footprint/);
+});
+
+// ---- spec rules: net classes, project and DRC files ----
+import { buildRules, classifyNets, PARAMS } from "../src/rules.js";
+
+test("rules: spec values, fab limits intersect, and the via follows annular_min over via_pref", () => {
+  const r = buildRules({ mounting: "tht" });
+  assert.equal(r.classes.AUDIO_SIG.track, 0.35);
+  assert.equal(r.classes.HIGH_Z.clear, 0.4);
+  assert.equal(r.grid.route, 0.635);
+  assert.deepEqual([r.via.pad, r.via.drill], [1, 0.4], "0.8/0.4 would leave a 0.2 mm ring, below annular_min 0.3");
+  assert.ok((r.via.pad - r.via.drill) / 2 >= PARAMS.annular_min - 1e-9);
+  assert.ok(r.deviations.some((d) => /annular/.test(d)));
+  assert.ok(r.assumptions.some((a) => /Fab limits not given/.test(a)));
+  const strict = buildRules({ mounting: "smd", fab: { house: "X", minTrace: 0.4, minClear: 0.4 } });
+  assert.equal(strict.classes.HIGH_Z.track, 0.4, "a tighter fab limit wins");
+  assert.equal(strict.classes.AUDIO_SIG.clear, 0.4);
+  assert.ok(strict.deviations.some((d) => /HIGH_Z track widened/.test(d)));
+  assert.equal(strict.grid.route, 0.25);
+  assert.ok(strict.deviations.some((d) => /Routing grid 0.25/.test(d)));
+});
+
+test("net classes: rails, ground, bias divider and audio are told apart; files carry them", () => {
+  const circuit = lines(rail5(100, 40),
+    "r 100 40 100 80 0 10000", "r 100 80 100 120 0 10000", "g 100 120 100 140 0",      // divider
+    "c 100 80 160 80 0 1e-5 0", "g 160 80 160 100 0",                                   // cap from the midpoint to ground
+    "r 200 40 200 80 0 1000", "d 200 80 200 120 2 default", "g 200 120 200 140 0");
+  const r = build(extractNetlist(circuit), { mounting: "tht" });
+  assert.ok(r.ok, r.errors?.join());
+  const cls = Object.fromEntries(r.netClasses.byNet);
+  assert.equal(cls.GND, "GND");
+  assert.equal(cls["+5V"], "POWER");
+  const vals = Object.values(cls);
+  assert.ok(vals.includes("BIAS_VREF"), "the divider midpoint");
+  assert.ok(vals.includes("AUDIO_SIG"));
+  const pro = JSON.parse(r.files["circuit.kicad_pro"]);
+  assert.deepEqual(pro.net_settings.classes.map((c) => c.name).slice(0, 2), ["Default", "AUDIO_SIG"]);
+  assert.ok(pro.net_settings.netclass_patterns.some((p) => p.netclass === "POWER" && p.pattern === "/+5V"));
+  assert.ok(pro.net_settings.classes.every((c) => c.via_diameter === 1 && c.via_drill === 0.4));
+  const dru = r.files["circuit.kicad_dru"];
+  assert.match(dru, /^\(version 1\)/);
+  assert.match(dru, /highz_clearance/);
+  assert.equal([...dru].filter((c) => c === "(").length, [...dru].filter((c) => c === ")").length, "balanced parentheses");
+});
+
+test("net classes: LED pins and VREF names, and precedence", () => {
+  const it = (ref, kind, pins) => ({ ref, kind, pins: pins.map(([num, net, fn]) => ({ num, net, fn })) });
+  const { byNet } = classifyNets([
+    it("D1", "led", [["2", "LED_A", "A"], ["1", "LED_K", "K"]]),
+    it("R1", "resistor", [["1", "+9V"], ["2", "LED_A"]]),
+    it("U1", "opamp", [["3", "VREF", "+"], ["2", "IN", "-"], ["1", "OUT", "OUT"]]),
+    it("Q1", "bjt", [["2", "BASE", "B"], ["1", "EM", "E"], ["3", "COL", "C"]]),
+  ], ["+9V"]);
+  assert.equal(byNet.get("LED_A"), "LED_CTRL");
+  assert.equal(byNet.get("LED_K"), "LED_CTRL");
+  assert.equal(byNet.get("VREF"), "BIAS_VREF", "VREF wins over HIGH_Z although it feeds a + input");
+  assert.equal(byNet.get("BASE"), "HIGH_Z");
+  assert.equal(byNet.get("OUT"), "AUDIO_SIG");
+  assert.equal(byNet.get("+9V"), "POWER");
+});
+
+test("op-amp + inputs and transistor bases are HIGH_Z", () => {
+  const nl = extractNetlist(amp);
+  const r = build(nl, { ics: { U1: "LM358", U2: "LM358", U3: "LM358" } });
+  const highZ = [...r.netClasses.byNet].filter(([, c]) => c === "HIGH_Z");
+  assert.ok(highZ.length >= 1, "at least one op-amp + input net");
+  const bjt = build(extractNetlist(lines(rail5(360, 84), "g 360 116 360 136 0", "t 300 100 360 100 0 1 0.7 0 100", "r 240 100 300 100 0 1000")), { mounting: "tht" });
+  assert.equal(bjt.netClasses.byNet.get(bjt.labels.find((l) => l.ref === "Q1" && l.num === "2").net), "HIGH_Z", "the base net");
+});
+
+test("through-hole boards sit on the 1.27 mm placement grid with the origin on the 2.54 mm grid; SMD boards use 0.5", () => {
+  const near = (v, step) => Math.abs(v / step - Math.round(v / step)) < 1e-6;
+  const tht = build(extractNetlist(amp), { mounting: "tht", ics: { U1: "LM358", U2: "LM358", U3: "LM358" } });
+  assert.ok(tht.layout.parts.every((p) => near(p.x, 1.27) && near(p.y, 1.27)), "part origins on 1.27");
+  const pcb = parseSexp(tht.files["circuit.kicad_pcb"]);
+  for (const f of kids(pcb, "footprint")) {
+    const at = kid(f, "at");
+    assert.ok(near(Number(at[1]), 1.27) && near(Number(at[2]), 1.27), "footprint origin on the 1.27 grid in KiCad's coordinates");
+  }
+  const smd = build(extractNetlist(amp), { mounting: "smd", ics: { U1: "LM358", U2: "LM358", U3: "LM358" } });
+  assert.ok(smd.layout.parts.every((p) => near(p.x, 0.5) && near(p.y, 0.5)));
+  const outline = kids(parseSexp(smd.files["circuit.kicad_pcb"]), "gr_arc");
+  assert.equal(outline.length, 4, "rounded corners, radius at least 1 mm");
 });
