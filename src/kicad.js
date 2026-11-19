@@ -72,15 +72,17 @@ const spec = {
 
 /**
  * @param {ReturnType<import("./netlist.js").extractNetlist>} netlist
- * @param {{name?: string, mounting?: "smd"|"tht", ics?: Record<string,string>, supply?: {pos?: string, neg?: string},
+ * @param {{name?: string, mounting: "smd"|"tht", ics?: Record<string,string>, supply?: {pos?: string, neg?: string},
  *          decouple?: boolean, ignoreUnsupported?: boolean, uuid?: () => string}} opts  ics: op-amp ref -> IC id
  * @returns {{ok: true, files: Record<string,string>, summary: object, warnings: string[]} | {ok: false, errors: string[]}}
  */
 export function buildProject(netlist, opts = {}) {
-  const mounting = opts.mounting === "tht" ? "tht" : "smd";
+  const mounting = opts.mounting;
   const name = (opts.name || "circuit").replace(/[^\w.-]+/g, "_").slice(0, 60) || "circuit";
   const uuid = opts.uuid ?? (() => crypto.randomUUID());
   const errors = [], warnings = [...netlist.warnings];
+  // One mounting style per board, chosen by the user before anything is generated.
+  if (mounting !== "smd" && mounting !== "tht") return { ok: false, errors: ["Choose through-hole or surface-mount before generating the board."] };
 
   // --- checks that must pass before anything is generated ---
   if (netlist.unsupported.length && !opts.ignoreUnsupported) {
@@ -189,6 +191,7 @@ export function buildProject(netlist, opts = {}) {
       const pinList = [...pp.left, ...pp.right].map((p) => ({ num: p.num, net: nets.get(p.num) ?? null }));
       const choice = choices[chunk[0].ref];
       const fp = icFootprint(ic, choice, mounting);
+      if (fp.warning) warnings.push(fp.warning);
       const ref = `U${chunk[0].ref.replace(/^\D+/, "")}`;
       const mpn = choice && icFromChoice(chunk[0], choice) === id ? choice.mpn : "";
       items.push({ ref, symbol: id, value: mpn || id, footprint: fp.footprint, source: fp.fromBom ? "BOM" : "default", mpn, pins: pinList });

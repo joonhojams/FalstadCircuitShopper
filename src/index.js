@@ -435,7 +435,7 @@ async function handleKicad(req) {
   if (!netlist.parts.length) return json({ error: "No components found. Is this a CircuitJS \"Export As Text\" file?" }, 422);
   const opts = {
     name: typeof body.name === "string" ? body.name : "circuit",
-    mounting: body.mounting === "tht" ? "tht" : "smd",
+    mounting: body.mounting === "tht" || body.mounting === "smd" ? body.mounting : undefined,
     ics: body.ics && typeof body.ics === "object" ? body.ics : {},
     supply: body.supply && typeof body.supply === "object" ? body.supply : undefined,
     decouple: body.decouple !== false,

@@ -245,7 +245,7 @@
       <h2>PCB (KiCad 9)</h2>
       <p class="hint">Creates a KiCad project with a schematic and a board whose parts are already placed and wired as unrouted connections. You choose the ICs for the op-amps, every DC rail of the same voltage is joined into one net, and a single power connector brings in all the supplies. Open it in KiCad to adjust the placement, route the traces and order from there.</p>
       <div class="row">
-        <label>Parts <select id="kc-mount"><option value="smd">Surface-mount</option><option value="tht">Through-hole</option></select></label>
+        <label>Parts <select id="kc-mount"><option value="">Choose…</option><option value="smd">Surface-mount</option><option value="tht">Through-hole</option></select></label>
         <label><input type="checkbox" id="kc-decouple" checked> 100 nF decoupling cap per IC</label>
         <button id="kc-go">Check circuit</button>
       </div>
@@ -759,8 +759,8 @@ function renderKicad(d) {
   box.replaceChildren();
   const chosen = Object.keys(kcChoices()).length;
   box.append(el("p", { class: "hint" }, chosen
-    ? `Footprints follow the ${chosen} part(s) chosen in the price table above (package and mounting type). Parts without a choice use the mounting style selected here.`
-    : "No parts chosen yet. Look up prices above first and the board will use the real package of each part; until then it uses the mounting style selected here."));
+    ? `Footprints follow the ${chosen} part(s) chosen in the price table above (package and mounting type). The mounting style selected here applies to every part, so a pick of the other style is reported and not followed.`
+    : "No parts chosen yet. Look up prices above first and the board will use the real package of each part; until then it uses the mounting style selected here for every part."));
   if (d.ics.length) {
     box.append(el("h3", { style: "font-size:14px;margin:12px 0 4px" }, "ICs"));
     for (const ic of d.ics) {
@@ -789,6 +789,12 @@ function renderKicad(d) {
 async function kcCheck() {
   const text = $("#input").value;
   if (!text.trim()) return;
+  if (!$("#kc-mount").value) {          // one mounting style per board, chosen first
+    $("#kc-out").replaceChildren();
+    $("#kc-dl-row").hidden = true;
+    $("#kc-status").textContent = "Choose through-hole or surface-mount first: the whole board uses one style.";
+    return;
+  }
   paint($("#kc-status"), "Working…", true);
   try {
     renderKicad(await api("/api/kicad", { method: "POST", body: JSON.stringify(kcBody(false)) }));

@@ -83,14 +83,14 @@ const amp = lines(
   "a 800 300 900 300 0 15 -15 100 0.5 0 100000");
 
 test("build refuses until every op-amp has an IC", () => {
-  const r = buildProject(extractNetlist(amp), {});
+  const r = build(extractNetlist(amp), {});
   assert.equal(r.ok, false);
   assert.equal(r.errors.length, 3);
 });
 
 test("op-amps pack into dual packages with supply, decoupling and a single power connector", () => {
   let k = 0;
-  const r = buildProject(extractNetlist(amp), { ics: { U1: "LM358", U2: "LM358", U3: "LM358" }, uuid: () => `00000000-0000-4000-8000-${String(++k).padStart(12, "0")}` });
+  const r = build(extractNetlist(amp), { ics: { U1: "LM358", U2: "LM358", U3: "LM358" }, uuid: () => `00000000-0000-4000-8000-${String(++k).padStart(12, "0")}` });
   assert.ok(r.ok, r.errors?.join());
   const refs = r.summary.parts.map((p) => p.ref);
   assert.deepEqual(refs.filter((x) => x.startsWith("U")), ["U1", "U3"]);
@@ -120,7 +120,7 @@ test("op-amps pack into dual packages with supply, decoupling and a single power
 
 test("through-hole choice changes footprints and warns about transistor pinouts", () => {
   const nl = extractNetlist(lines("R 360 84 360 60 0 0 40 5 0 0 0.5", "g 360 116 360 136 0", "t 300 100 360 100 0 1 0.7 0 100", "r 240 100 300 100 0 1000"));
-  const r = buildProject(nl, { mounting: "tht" });
+  const r = build(nl, { mounting: "tht" });
   assert.ok(r.ok);
   assert.match(r.summary.parts.find((p) => p.ref === "Q1").footprint, /TO-92/);
   assert.ok(r.warnings.some((w) => /TO-92 pin order/.test(w)));
@@ -128,8 +128,8 @@ test("through-hole choice changes footprints and warns about transistor pinouts"
 
 test("unsupported elements block the build unless ignored", () => {
   const nl = extractNetlist(lines("r 0 0 40 0 0 100", "T 300 300 340 300 0 2 1 1 0.99"));
-  assert.equal(buildProject(nl, {}).ok, false);
-  assert.equal(buildProject(nl, { ignoreUnsupported: true }).ok, true);
+  assert.equal(build(nl, {}).ok, false);
+  assert.equal(build(nl, { ignoreUnsupported: true }).ok, true);
 });
 
 test("zip has valid structure and checksums", () => {
@@ -161,7 +161,7 @@ test("potentiometer: ends and wiper land on the right nets and pads", () => {
   const net = Object.fromEntries(pot.pins.map((p) => [p.name, p.net]));
   assert.equal(net.A, "GND");
   assert.equal(net.W, "+5V");
-  const r = buildProject(nl, { mounting: "tht" });
+  const r = build(nl, { mounting: "tht" });
   assert.ok(r.ok, r.errors?.join());
   assert.equal(label(r, "RV1", "1"), "GND");
   assert.equal(label(r, "RV1", "2"), "+5V");
@@ -171,10 +171,10 @@ test("potentiometer: ends and wiper land on the right nets and pads", () => {
 
 test("a PCB-mount pot picked in the BOM gets its real footprint; a panel pot gets a terminal block", () => {
   const nl = extractNetlist(lines("174 100 100 164 100 0 10000 0.5 Volume", "g 100 100 100 120 0", rail5(132, 84)));
-  const bourns = buildProject(nl, { choices: { RV1: { mpn: "3296W-1-103LF", mounting: "Through Hole", package: "" } } });
+  const bourns = build(nl, { choices: { RV1: { mpn: "3296W-1-103LF", mounting: "Through Hole", package: "" } } });
   assert.equal(bourns.summary.parts.find((p) => p.ref === "RV1").footprint, "Potentiometer_THT:Potentiometer_Bourns_3296W_Vertical");
   assert.equal(bourns.summary.parts.find((p) => p.ref === "RV1").source, "BOM");
-  const panel = buildProject(nl, { choices: { RV1: { mpn: "P160KNP-0QC20B10K", mounting: "Panel Mount", description: "10K OHM 0.25W PANEL MOUNT" } } });
+  const panel = build(nl, { choices: { RV1: { mpn: "P160KNP-0QC20B10K", mounting: "Panel Mount", description: "10K OHM 0.25W PANEL MOUNT" } } });
   assert.match(panel.summary.parts.find((p) => p.ref === "RV1").footprint, /TerminalBlock/);
 });
 
@@ -182,7 +182,7 @@ test("logic gate: inputs map to package pins, spare gates are tied low", () => {
   const nl = extractNetlist(lines("150 200 100 264 100 0 2 0 5", "g 200 116 200 140 0", rail5(200, 84)));
   const gate = nl.parts.find((p) => p.kind === "gate");
   assert.deepEqual([gate.fn, gate.inputs], ["and", 2]);
-  const r = buildProject(nl, {});
+  const r = build(nl, {});
   assert.ok(r.ok, r.errors?.join());
   const u = r.summary.packages[0];
   assert.equal(u.ic, "74HC08");
@@ -194,24 +194,36 @@ test("logic gate: inputs map to package pins, spare gates are tied low", () => {
   assert.match(r.files["circuit.kicad_sch"], /no_connect/);
 });
 
-test("the IC and package follow the part picked in the BOM", () => {
+test("the IC and package follow the part picked in the BOM when it matches the board's mounting", () => {
   const nl = extractNetlist(lines("151 200 100 264 100 0 2 0 5", "g 200 116 200 140 0", rail5(200, 84)));
-  const nand = (c) => buildProject(nl, { choices: { U1: c } });
-  const dip = nand({ mpn: "SN74HC00N", package: "14-DIP (0.300\", 7.62mm)", mounting: "Through Hole" });
+  const nand = (c, mounting) => build(nl, { mounting, choices: { U1: c } });
+  const dip = nand({ mpn: "SN74HC00N", package: "14-DIP (0.300\", 7.62mm)", mounting: "Through Hole" }, "tht");
   assert.equal(dip.summary.packages[0].ic, "74HC00");
   assert.equal(dip.summary.parts.find((p) => p.ref === "U1").footprint, "Package_DIP:DIP-14_W7.62mm");
   assert.equal(dip.summary.parts.find((p) => p.ref === "U1").value, "SN74HC00N");
-  const soic = nand({ mpn: "SN74HC00D", package: "14-SOIC (0.154\", 3.90mm Width)", mounting: "Surface Mount" });
+  assert.ok(!dip.warnings.some((w) => /this board is/.test(w)));
+  const soic = nand({ mpn: "SN74HC00D", package: "14-SOIC (0.154\", 3.90mm Width)", mounting: "Surface Mount" }, "smd");
   assert.match(soic.summary.parts.find((p) => p.ref === "U1").footprint, /SOIC-14/);
   // a pick that is a different gate type is ignored rather than building the wrong function
-  const wrong = buildProject(extractNetlist(lines("150 200 100 264 100 0 2 0 5", "g 200 116 200 140 0", rail5(200, 84))), { choices: { U1: { mpn: "SN74HC00N" } } });
+  const wrong = build(extractNetlist(lines("150 200 100 264 100 0 2 0 5", "g 200 116 200 140 0", rail5(200, 84))), { choices: { U1: { mpn: "SN74HC00N" } } });
   assert.equal(wrong.summary.packages[0].ic, "74HC08");
 });
 
+test("a board has one mounting style: it must be chosen, and a BOM pick of the other style is reported, not followed", () => {
+  const nl = extractNetlist(lines("151 200 100 264 100 0 2 0 5", "g 200 116 200 140 0", rail5(200, 84)));
+  const none = buildProject(nl, {});
+  assert.equal(none.ok, false);
+  assert.match(none.errors[0], /Choose through-hole or surface-mount/);
+  assert.equal(buildProject(nl, { mounting: "dip" }).ok, false);
+  const dipOnSmd = build(nl, { mounting: "smd", choices: { U1: { mpn: "SN74HC00N", package: "14-DIP", mounting: "Through Hole" } } });
+  assert.match(dipOnSmd.summary.parts.find((p) => p.ref === "U1").footprint, /SOIC-14/);
+  assert.ok(dipOnSmd.warnings.some((w) => /through-hole but this board is surface-mount/.test(w)));
+});
+
 test("three-input gates use triple-gate ICs; four inputs are blocked", () => {
-  const three = buildProject(extractNetlist(lines("152 200 100 264 100 0 3 0 5", rail5(200, 84))), {});
+  const three = build(extractNetlist(lines("152 200 100 264 100 0 3 0 5", rail5(200, 84))), {});
   assert.equal(three.ok, false); // OR3 has no catalog IC: an error, not a wrong board
-  const nand3 = buildProject(extractNetlist(lines("151 200 100 264 100 0 3 0 5", rail5(200, 100))), {});
+  const nand3 = build(extractNetlist(lines("151 200 100 264 100 0 3 0 5", rail5(200, 100))), {});
   assert.equal(nand3.summary.packages[0].ic, "74HC10");
   const four = extractNetlist(lines("150 200 100 264 100 0 4 0 5"));
   assert.ok(four.unsupported.length);
@@ -222,37 +234,41 @@ test("555 timer: pins follow the Falstad chip layout and map to DIP-8 pins", () 
   const nl = extractNetlist(lines("165 300 100 396 100 6 0", rail5(364, 68), "g 396 260 396 280 0"));
   const t = nl.parts.find((p) => p.kind === "timer");
   assert.equal(t.pins.length, 8);
-  const r = buildProject(nl, {});
+  const r = build(nl, {});
   assert.ok(r.ok, r.errors?.join());
   assert.equal(r.summary.packages[0].ic, "NE555");
   assert.equal(label(r, "U1", "8"), "+5V");
   assert.equal(label(r, "U1", "1"), "GND");
   assert.match(r.summary.parts.find((p) => p.ref === "U1").footprint, /SOIC-8/);
-  assert.equal(buildProject(nl, { mounting: "tht" }).summary.parts.find((p) => p.ref === "U1").footprint, "Package_DIP:DIP-8_W7.62mm");
+  assert.equal(build(nl, { mounting: "tht" }).summary.parts.find((p) => p.ref === "U1").footprint, "Package_DIP:DIP-8_W7.62mm");
 });
 
 test("a 555 without ground or reset pins gets them wired on the board", () => {
   const nl = extractNetlist(lines("165 300 100 396 100 0 0", rail5(364, 68)));
-  const r = buildProject(nl, {});
+  const r = build(nl, {});
   assert.ok(r.ok, r.errors?.join());
   assert.equal(label(r, "U1", "1"), "GND");
   assert.equal(label(r, "U1", "4"), "+5V");  // reset tied high
 });
 
-test("resistor and BJT footprints follow the BOM pick over the global setting", () => {
+test("resistor and BJT footprints follow the board's mounting; a pick of the other style is warned about", () => {
   const nl = extractNetlist(lines(rail5(360, 84), "g 360 116 360 136 0", "t 300 100 360 100 0 1 0.7 0 100", "r 240 100 300 100 0 1000"));
-  const r = buildProject(nl, {
-    mounting: "tht",
-    choices: {
-      R1: { mpn: "RC0603FR-071KL", package: "0603 (1608 Metric)", mounting: "Surface Mount" },
-      Q1: { mpn: "BC547BTA", package: "TO-92-3", mounting: "Through Hole" },
-    },
-  });
-  assert.ok(r.ok, r.errors?.join());
-  assert.equal(r.summary.parts.find((p) => p.ref === "R1").footprint, "Resistor_SMD:R_0603_1608Metric");
-  assert.equal(r.summary.parts.find((p) => p.ref === "Q1").footprint, "Package_TO_SOT_THT:TO-92_Inline");
-  assert.ok(!r.warnings.some((w) => /TO-92 pin order/.test(w)), "BC547 pinout is known");
-  assert.equal(label(r, "Q1", "2"), "N001");  // base on pad 2
+  const picks = {
+    R1: { mpn: "RC0603FR-071KL", package: "0603 (1608 Metric)", mounting: "Surface Mount" },
+    Q1: { mpn: "BC547BTA", package: "TO-92-3", mounting: "Through Hole" },
+  };
+  const tht = build(nl, { mounting: "tht", choices: picks });
+  assert.ok(tht.ok, tht.errors?.join());
+  assert.match(tht.summary.parts.find((p) => p.ref === "R1").footprint, /^Resistor_THT:/);
+  assert.ok(tht.warnings.some((w) => /surface-mount but this board is through-hole/.test(w)), "the 0603 pick is reported");
+  assert.equal(tht.summary.parts.find((p) => p.ref === "Q1").footprint, "Package_TO_SOT_THT:TO-92_Inline");
+  assert.ok(!tht.warnings.some((w) => /TO-92 pin order/.test(w)), "BC547 pinout is known");
+  assert.equal(label(tht, "Q1", "2"), "N001");  // base on pad 2
+
+  const smd = build(nl, { mounting: "smd", choices: picks });
+  assert.equal(smd.summary.parts.find((p) => p.ref === "R1").footprint, "Resistor_SMD:R_0603_1608Metric");
+  assert.match(smd.summary.parts.find((p) => p.ref === "Q1").footprint, /SOT-23/);
+  assert.ok(smd.warnings.some((w) => /through-hole but this board is surface-mount/.test(w)), "the TO-92 pick is reported");
 });
 
 test("DigiKey parameters reach the price options", async () => {
@@ -271,7 +287,7 @@ test("board preview: every part gets a body and a spot inside the board outline,
   assert.deepEqual([bodyFor("Resistor_SMD:R_0805_2012Metric").w, bodyFor("Resistor_SMD:R_0805_2012Metric").l], [2, 1.2]);
   assert.equal(bodyFor("Capacitor_THT:CP_Radial_D5.0mm_P2.00mm").shape, "cyl");
   const nl = extractNetlist(lines("R 0 0 0 -20 0 0 40 5 0 0 0.5", "r 0 0 60 0 0 1000", "c 60 0 120 0 0 1e-7 0", "g 120 0 120 20 0"));
-  const built = buildProject(nl, {});
+  const built = build(nl, {});
   assert.ok(built.ok);
   const b = layoutBoard(built.summary.parts);
   assert.equal(b.parts.length, built.summary.parts.length);
@@ -289,8 +305,11 @@ import { FOOTPRINT_DATA } from "../src/footprint-data.js";
 import { missingFootprints } from "../src/pcb.js";
 import { resolve, icFootprint } from "../src/footprints.js";
 
+// A board needs an explicit mounting style; most tests do not care which.
+const build = (nl, o = {}) => buildProject(nl, { mounting: "smd", ...o });
+
 const detUuid = () => { let k = 0; return () => `00000000-0000-4000-8000-${String(++k).padStart(12, "0")}`; };
-const ampBuild = () => buildProject(extractNetlist(amp), { name: "amp", ics: { U1: "LM358", U2: "LM358", U3: "LM358" }, uuid: detUuid() });
+const ampBuild = () => build(extractNetlist(amp), { name: "amp", ics: { U1: "LM358", U2: "LM358", U3: "LM358" }, uuid: detUuid() });
 
 test("every footprint the app can choose has geometry (and so exists in the KiCad library it was read from)", () => {
   const names = new Set();

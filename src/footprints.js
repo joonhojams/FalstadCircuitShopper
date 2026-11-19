@@ -1,5 +1,6 @@
 // Chooses a KiCad footprint for each board part from the part picked in the BOM (its DigiKey
-// package, mounting type and part number). With no pick, the global SMD/through-hole setting decides.
+// package and part number). The board-wide SMD/through-hole choice always decides the mounting
+// style, so one board never mixes the two; a BOM pick of the other style is reported, not followed.
 //
 // `choice` is { mpn, package, supplierPackage, mounting, description } or undefined.
 
@@ -29,6 +30,7 @@ const DEFAULT = {
   switch:    { smd: "Button_Switch_THT:SW_PUSH_6mm", tht: "Button_Switch_THT:SW_PUSH_6mm" },
 };
 const PREFIX = { resistor: "R", capacitor: "C", inductor: "L" };
+const STYLE = { smd: "surface-mount", tht: "through-hole" };
 
 // Transistor packages: footprint + which pad each pin lands on (BJT B/C/E, MOSFET G/D/S).
 const TRANSISTOR = {
@@ -67,9 +69,15 @@ const ICPKG = [
 export function resolve(kind, choice, globalMount) {
   const t = txt(choice);
   const picked = mountOf(choice);
-  const mount = picked ?? globalMount;
-  const fromBom = Boolean(choice) && picked !== null;
-  const out = (footprint, m = mount, extra = {}) => ({ footprint, mounting: m, fromBom, ...extra });
+  const mount = globalMount;
+  const fromBom = Boolean(choice) && picked === mount;
+  // Only said when the footprint really is the other style from the part picked in the BOM.
+  const mismatch = (m) => (picked && picked !== m
+    ? `The part picked in the BOM is ${STYLE[picked]} but this board is ${STYLE[m]}, so the footprint is ${STYLE[m]}. Pick a ${STYLE[m]} part in the price table or change the board's mounting.` : "");
+  const out = (footprint, m = mount, extra = {}) => {
+    const warning = [extra.warning, mismatch(m)].filter(Boolean).join(" ");
+    return { footprint, mounting: m, fromBom: fromBom && picked === m, ...extra, ...(warning ? { warning } : {}) };
+  };
 
   if (kind in PREFIX) {
     const P = PREFIX[kind];
@@ -107,7 +115,7 @@ export function resolve(kind, choice, globalMount) {
     const which = kind === "bjt" ? "bjt" : "mos";
     let key = Object.keys(TRANSISTOR).find((k) => t.includes(k) || t.includes(k.replace("-", "")));
     if (/dpak/.test(t)) key = "to-252";
-    if (!key) key = mount === "smd" ? DEFAULT_PKG.smd : DEFAULT_PKG.tht[kind];
+    if (!key || TRANSISTOR[key].mount !== mount) key = mount === "smd" ? DEFAULT_PKG.smd : DEFAULT_PKG.tht[kind];
     const pk = TRANSISTOR[key];
     let pads = pk[which], warning;
     if (key === "to-92") {
@@ -115,7 +123,8 @@ export function resolve(kind, choice, globalMount) {
       if (known) pads = known[2];
       else warning = `TO-92 pin order differs between parts. The board assumes ${Object.keys(pads).sort((a, b) => pads[a] - pads[b]).join("-")} (pads 1-3); check the datasheet of the exact part or pick it in the BOM.`;
     } else if (key === "to-220" && kind === "mosfet" && !choice) warning = "Assumes G-D-S for TO-220. Check the datasheet of the exact MOSFET.";
-    return { footprint: pk.fp, mounting: pk.mount, fromBom: fromBom && t.includes(key.replace("-", "")) || t.includes(key), pads, warning };
+    const warn = [warning, mismatch(pk.mount)].filter(Boolean).join(" ");
+    return { footprint: pk.fp, mounting: pk.mount, fromBom: fromBom && (t.includes(key.replace("-", "")) || t.includes(key)), pads, ...(warn ? { warning: warn } : {}) };
   }
 
   if (kind === "pot") {
@@ -138,9 +147,11 @@ export function icFootprint(ic, choice, globalMount) {
   const t = txt(choice);
   const pins = ic.units.length ? Math.max(...ic.units.flatMap((u) => Object.values(u).map(Number)), Number(ic.power.pos)) : 8;
   const n = pins > 8 ? 14 : 8;
-  const special = ICPKG.find(([re, m]) => re.test(t) && m[n]);
+  const picked = mountOf(choice);
+  const special = globalMount === "smd" && ICPKG.find(([re, m]) => re.test(t) && m[n]);
   if (special) return { footprint: special[1][n], mounting: "smd", fromBom: true };
-  const m = mountOf(choice);
-  const mount = m ?? globalMount;
-  return { footprint: ic.footprints[mount], mounting: mount, fromBom: m !== null };
+  const fp = ic.footprints[globalMount];
+  const warning = picked && picked !== globalMount
+    ? `The ${ic.name} picked in the BOM is ${STYLE[picked]} but this board is ${STYLE[globalMount]}, so it gets the ${STYLE[globalMount]} package. Pick a ${STYLE[globalMount]} part in the price table or change the board's mounting.` : "";
+  return { footprint: fp, mounting: globalMount, fromBom: picked === globalMount, ...(warning ? { warning } : {}) };
 }
