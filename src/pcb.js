@@ -11,8 +11,10 @@
 
 import { FOOTPRINT_DATA } from "./footprint-data.js";
 import { bodyFor } from "./board.js";
+import { PARAMS } from "./netclass.js";
 
 const STEP = 0.5;          // placement grid, mm
+const THT_GRID = 1.27;     // spec grid_place_fine; THT pads then land on the 0.635 mm routing lattice
 const SEARCH = 1;          // spacing of candidate positions around a target, mm (a multiple of STEP)
 const GAP = 0.3;           // minimum space between courtyards, mm
 const MARGIN = 3;          // board edge to the nearest courtyard, mm
@@ -55,7 +57,11 @@ function oriented(fpName, rot) {
   const fp = FOOTPRINT_DATA[fpName];
   const pads = fp.pads.map((p) => {
     const [x, y] = rotPt(p.x, p.y, rot);
-    return { n: p.n, x, y, w: swap(rot) ? p.h : p.w, h: swap(rot) ? p.w : p.h };
+    const ang = (((p.r ?? 0) + rot) % 360 + 360) % 360;
+    // Pads at odd angles are boxed by their longer side, which is only ever conservative.
+    const sw = ang % 90 !== 0 ? "box" : ang % 180 === 90 ? "swap" : "keep";
+    const w = sw === "box" ? Math.max(p.w, p.h) : sw === "swap" ? p.h : p.w, h = sw === "box" ? Math.max(p.w, p.h) : sw === "swap" ? p.w : p.h;
+    return { n: p.n, x, y, w, h, s: p.s, t: p.t, l: p.l, d: p.d };
   });
   return { pads, cy: rotBox(fp.cy, rot), body: rotBox(bodyBox(fp), rot) };
 }
@@ -64,8 +70,9 @@ function oriented(fpName, rot) {
  * @param {{ref: string, footprint: string, pins: {num: string, net: string|null}[]}[]} items
  * @returns {{parts: object[], w: number, l: number, warnings: string[]}}
  */
-export function placeParts(items) {
+export function placeParts(items, opts = {}) {
   const warnings = [];
+  const gap = opts.gap ?? GAP;                 // courtyard-to-courtyard space; routing needs room for traces between parts
   const info = new Map();                     // item -> per-pad net, by pad number
   for (const it of items) {
     const fp = FOOTPRINT_DATA[it.footprint];
@@ -85,7 +92,7 @@ export function placeParts(items) {
     const pads = o.pads.map((p) => ({ ...p, x: R4(x + p.x), y: R4(y + p.y), net: info.get(it).get(p.n) ?? null }));
     const rec = { it, rot, x, y, box: [x + o.cy[0], y + o.cy[1], x + o.cy[2], y + o.cy[3]], body: [x + o.body[0], y + o.body[1], x + o.body[2], y + o.body[3]], pads };
     placed.push(rec);
-    cellsOf(rec.box, GAP, (k) => (grid.get(k) ?? grid.set(k, []).get(k)).push(rec));
+    cellsOf(rec.box, gap, (k) => (grid.get(k) ?? grid.set(k, []).get(k)).push(rec));
     for (const p of pads) if (p.net) (netPads.get(p.net) ?? netPads.set(p.net, []).get(p.net)).push(p);
     return rec;
   };
@@ -99,10 +106,10 @@ export function placeParts(items) {
   const free = (box) => {
     if (box[0] < minX) return false;
     let ok = true;
-    cellsOf(box, GAP, (k) => {
+    cellsOf(box, gap, (k) => {
       if (!ok) return;
       for (const r of grid.get(k) ?? []) {
-        if (box[0] < r.box[2] + GAP && box[2] > r.box[0] - GAP && box[1] < r.box[3] + GAP && box[3] > r.box[1] - GAP) { ok = false; return; }
+        if (box[0] < r.box[2] + gap && box[2] > r.box[0] - gap && box[1] < r.box[3] + gap && box[3] > r.box[1] - gap) { ok = false; return; }
       }
     });
     return ok;
@@ -121,7 +128,9 @@ export function placeParts(items) {
     return c;
   };
   const score = (it) => it.pins.reduce((s, p) => s + (p.net && netPads.has(p.net) ? 1 : 0), 0);
-  const snap = (v) => Math.round(v / STEP) * STEP;
+  // Through-hole parts sit on a 1.27 mm grid so their pads fall on the router's 0.635 mm lattice; SMD parts on 0.5 mm.
+  const stepOf = (it) => (FOOTPRINT_DATA[it.footprint].attr === "through_hole" ? THT_GRID : STEP);
+  const snap = (v, st) => Math.round(v / st) * st;
 
   function put(it) {
     const fp0 = oriented(it.footprint, 0);
@@ -136,9 +145,10 @@ export function placeParts(items) {
     }
     if (k) { tx /= k; ty /= k; }
     else if (placed.length) {                 // no connection yet: next to the placed group
-      tx = Math.max(...placed.map((r) => r.box[2])) - fp0.cy[0] + GAP; ty = placed[0].y;
+      tx = Math.max(...placed.map((r) => r.box[2])) - fp0.cy[0] + gap; ty = placed[0].y;
     }
-    tx = snap(tx); ty = snap(ty);
+    const st = stepOf(it), sp = st === STEP ? SEARCH : st;
+    tx = snap(tx, st); ty = snap(ty, st);
     let bestRec = null;
     for (const rot of rotsFor(it)) {
       const o = oriented(it.footprint, rot);
@@ -148,7 +158,7 @@ export function placeParts(items) {
           const edge = Math.abs(dx) === r;
           for (let dy = -r; dy <= r && found < 8; dy += edge ? 1 : 2 * r || 1) {   // whole column on the ring's sides, two cells otherwise
             if (!edge && Math.abs(dy) !== r) continue;
-            const x = tx + dx * SEARCH, y = ty + dy * SEARCH;
+            const x = R4(tx + dx * sp), y = R4(ty + dy * sp);
             if (!free([x + o.cy[0], y + o.cy[1], x + o.cy[2], y + o.cy[3]])) continue;
             found++;
             const c = cost(it, o, x, y) + rot * 0.001;            // prefer upright on a tie
@@ -173,7 +183,7 @@ export function placeParts(items) {
   // Move everything so the board starts at (0, 0) with a margin around the courtyards.
   const bx0 = Math.min(...placed.map((r) => r.box[0])), by0 = Math.min(...placed.map((r) => r.box[1]));
   const bx1 = Math.max(...placed.map((r) => r.box[2])), by1 = Math.max(...placed.map((r) => r.box[3]));
-  const dx = Math.ceil((MARGIN - bx0) / STEP) * STEP, dy = Math.ceil((MARGIN - by0) / STEP) * STEP;
+  const dx = R4(Math.ceil((MARGIN - bx0) / THT_GRID) * THT_GRID), dy = R4(Math.ceil((MARGIN - by0) / THT_GRID) * THT_GRID);
   const w = Math.ceil(bx1 + dx + MARGIN), l = Math.ceil(by1 + dy + MARGIN);
   for (const r of placed) {
     r.x = R4(r.x + dx); r.y = R4(r.y + dy);
@@ -185,9 +195,9 @@ export function placeParts(items) {
 }
 
 /** Ratsnest: a minimum spanning tree over each net's pads, as [x1, y1, x2, y2]. */
-export function airwires(parts) {
+export function airwires(parts, only = null) {
   const byNet = new Map();
-  for (const r of parts) for (const p of r.pads) if (p.net) (byNet.get(p.net) ?? byNet.set(p.net, []).get(p.net)).push(p);
+  for (const r of parts) for (const p of r.pads) if (p.net && (!only || only.has(p.net))) (byNet.get(p.net) ?? byNet.set(p.net, []).get(p.net)).push(p);
   const out = [];
   for (const pads of byNet.values()) {
     if (pads.length < 2) continue;
@@ -204,7 +214,8 @@ export function airwires(parts) {
 }
 
 /** What the 3D preview draws: the same placement, with bodies sized from the footprints. */
-export function previewBoard(layout) {
+export function previewBoard(layout, routing = null, unrouted = []) {
+  const open = new Set(unrouted.map((u) => u.net));
   return {
     real: true, w: layout.w, l: layout.l, thickness: 1.6,
     parts: layout.parts.map((r) => {
@@ -217,7 +228,10 @@ export function previewBoard(layout) {
         pads: r.pads.map((p) => [p.x, p.y, R4(p.w), R4(p.h)]),
       };
     }),
-    air: airwires(layout.parts),
+    air: airwires(layout.parts, routing ? open : null),
+    tracks: (routing?.tracks ?? []).map((t) => ({ l: t.layer === "F.Cu" ? 0 : 1, w: R4(t.w), pts: t.pts })),
+    vias: (routing?.vias ?? []).map((v) => [v.x, v.y, v.size]),
+    routed: Boolean(routing),
   };
 }
 
@@ -253,7 +267,7 @@ const stroke = (w) => `(stroke (width ${R4(w || 0.12)}) (type solid))`;
  * @param {{name: string, items: object[], layout: ReturnType<typeof placeParts>, uuid: () => string, sheetFile: string}} a
  *   items[].symUuid is the schematic symbol's UUID, so Update PCB from Schematic keeps the link.
  */
-export function writePcb({ name, layout, uuid, sheetFile }) {
+export function writePcb({ name, layout, uuid, sheetFile, routing = null, pour = null }) {
   // Net names follow what KiCad gives a local label on the root sheet: "/NAME".
   const netId = new Map();
   for (const r of layout.parts) for (const p of r.pads) if (p.net && !netId.has(p.net)) netId.set(p.net, netId.size + 1);
@@ -303,6 +317,36 @@ ${pads.join("\n")}
   )`;
   });
 
+  // Copper: tracks, vias and the ground pour (filled in KiCad: Edit > Fill All Zones, shortcut B).
+  const nid = (n) => netId.get(n) ?? 0;
+  const copper = [];
+  for (const t of routing?.tracks ?? []) {
+    for (let k = 0; k + 1 < t.pts.length; k++) {
+      copper.push(`  (segment (start ${X(t.pts[k][0])} ${Y(t.pts[k][1])}) (end ${X(t.pts[k + 1][0])} ${Y(t.pts[k + 1][1])}) (width ${R4(t.w)}) (layer ${q(t.layer)}) (net ${nid(t.net)}) (uuid ${q(uuid())}))`);
+    }
+  }
+  for (const v of routing?.vias ?? []) {
+    copper.push(`  (via (at ${X(v.x)} ${Y(v.y)}) (size ${R4(v.size)}) (drill ${R4(v.drill)}) (layers "F.Cu" "B.Cu") (net ${nid(v.net)}) (uuid ${q(uuid())}))`);
+  }
+  if (pour && netId.has(pour)) {
+    const e = 0.5;                                       // KiCad also keeps the fill off the Edge.Cuts line
+    const poly = [[e, e], [layout.w - e, e], [layout.w - e, layout.l - e], [e, layout.l - e]].map(([x, y]) => `(xy ${X(x)} ${Y(y)})`).join(" ");
+    for (const layer of ["F.Cu", "B.Cu"]) {
+      copper.push(`  (zone (net ${nid(pour)}) (net_name ${q(netName(pour))}) (layer ${q(layer)}) (uuid ${q(uuid())}) (hatch edge 0.5)
+    (connect_pads (clearance ${PARAMS.pour_clear}))
+    (min_thickness 0.25) (filled_areas_thickness no)
+    (fill yes (thermal_gap ${PARAMS.thermal_gap}) (thermal_bridge_width ${PARAMS.thermal_spoke}))
+    (polygon (pts ${poly})))`);
+    }
+  }
+
+  const edgeLine = (o) => o.k === "a"
+    ? `  (gr_arc (start ${X(o.a[0])} ${Y(o.a[1])}) (mid ${X(o.a[2])} ${Y(o.a[3])}) (end ${X(o.a[4])} ${Y(o.a[5])}) (stroke (width 0.05) (type default)) (layer "Edge.Cuts") (uuid ${q(uuid())}))`
+    : `  (gr_line (start ${X(o.a[0])} ${Y(o.a[1])}) (end ${X(o.a[2])} ${Y(o.a[3])}) (stroke (width 0.05) (type default)) (layer "Edge.Cuts") (uuid ${q(uuid())}))`;
+  const outline = layout.outline
+    ? layout.outline.map(edgeLine).join("\n")
+    : `  (gr_rect (start ${X(0)} ${Y(0)}) (end ${X(layout.w)} ${Y(layout.l)}) (stroke (width 0.05) (type default)) (fill no) (layer "Edge.Cuts") (uuid ${q(uuid())}))`;
+
   const text = `(kicad_pcb
   (version 20241229)
   (generator "circuitjs-bom")
@@ -310,13 +354,14 @@ ${pads.join("\n")}
   (general (thickness 1.6) (legacy_teardrops no))
   (paper ${q(paper[0])})
 ${LAYERS}
-  (setup (pad_to_mask_clearance 0))
+  (setup (pad_to_mask_clearance ${PARAMS.mask_expansion}))
   (net 0 "")
 ${[...netId].map(([n, id]) => `  (net ${id} ${q(netName(n))})`).join("\n")}
 ${fps.join("\n")}
-  (gr_rect (start ${X(0)} ${Y(0)}) (end ${X(layout.w)} ${Y(layout.l)}) (stroke (width 0.05) (type default)) (fill no) (layer "Edge.Cuts") (uuid ${q(uuid())}))
+${copper.join("\n")}
+${outline}
   (embedded_fonts no)
 )
 `;
-  return { text, nets: netId.size, origin: [ox, oy], paper: paper[0] };
+  return { text, nets: netId.size, origin: [ox, oy], paper: paper[0], netNames: [...netId.keys()] };
 }

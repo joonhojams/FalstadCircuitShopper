@@ -441,6 +441,8 @@ async function handleKicad(req) {
     decouple: body.decouple !== false,
     ignoreUnsupported: body.ignoreUnsupported === true,
     choices: cleanChoices(body.choices),
+    route: body.route !== false,
+    fabMinClear: typeof body.fabMinClear === "number" && body.fabMinClear > 0 && body.fabMinClear < 2 ? body.fabMinClear : null,
   };
   const built = buildProject(netlist, opts);
   if (!body.download) {
@@ -460,6 +462,7 @@ async function handleKicad(req) {
       errors: built.ok ? [] : built.errors,
       summary: built.ok ? built.summary : null,
       board: built.ok ? (built.pcb ?? layoutBoard(built.summary.parts)) : null,
+      routing: built.ok ? built.summary.routing ?? null : null,
     });
   }
   if (!built.ok) return json({ error: built.errors.join(" ") , errors: built.errors }, 422);
@@ -475,9 +478,13 @@ const kicadReadme = (b) => `KiCad project generated from a CircuitJS circuit.
 
 1. Unzip, open ${b.summary.name}.kicad_pro in KiCad 9.
 2. Open the schematic and run Inspect > Electrical Rules Check.
-3. Open the PCB editor. ${b.summary.board ? `The board already holds every footprint, placed automatically inside a ${b.summary.board.width} x ${b.summary.board.height} mm outline, with its nets assigned and no traces drawn.
+3. Open the PCB editor. ${b.summary.board ? `The board already holds every footprint, placed automatically inside a ${b.summary.board.width} x ${b.summary.board.height} mm outline, with its nets assigned.${b.summary.routing ? `
+   It is also auto-routed (${b.summary.routing.unrouted.length ? b.summary.routing.unrouted.length + " net(s) left to finish by hand" : "every net"}), with a ground pour on both layers.
+   Press B (Edit > Fill All Zones) to fill the pours, then run Inspect > Design Rules Checker.
+   ${b.summary.name}.kicad_dru holds the spec's clearances and via limits; the net classes are in the project file.` : "\n   No traces are drawn."}
    Choose Tools > Update PCB from Schematic (F8) once to confirm it matches the schematic.` : "Choose Tools > Update PCB from Schematic (F8) to bring in the parts."}
-4. ${b.summary.board ? "Adjust the placement, route (Route > Interactive Router, or an autorouter plugin such as Freerouting)" : "Place, route"}, run Design Rules Check, then plot Gerbers.
+4. Review the placement and the routing by hand. Do not order without running KiCad's own DRC. report.md lists what this app checked, what it did not, and where it deviates from the spec. ${b.summary.name}.dsn is a Specctra file for Freerouting if you want to route again: open it there, export the session (.ses), then in KiCad use File > Import > Specctra Session.
+   After that, run Design Rules Check and plot Gerbers.
 
 Nets are connected by name labels on every pin. Footprints are KiCad standard-library
 names (${b.summary.mounting === "tht" ? "through-hole" : "surface-mount"}); change them in the schematic if you want other sizes.

@@ -1,0 +1,116 @@
+// Project-level routing rules for the KiCad files: custom DRC rules (.kicad_dru), net classes for the
+// .kicad_pro, and the report that goes in the zip. Values come from src/netclass.js (the spec's
+// <params> and <net_classes>).
+//
+// KiCad syntax here is written from memory of KiCad 8/9 files and has not been loaded into a real
+// KiCad: the report lists it as unverified. A rule KiCad can't parse is the thing to look for first
+// if the project shows a rules error when opened.
+
+import { PARAMS, VIA, NET_CLASSES } from "./netclass.js";
+
+const mm = (v) => `${Number(v.toFixed(3))}mm`;
+
+/** Custom DRC rules: the spec's net classes, via limits and the fab-facing minimums. */
+export function druText(fabMinClear = null) {
+  const L = ["(version 1)", ""];
+  // Later rules win in KiCad, so the general ones come first.
+  L.push(`(rule "pad_to_pad" (condition "A.Type == 'Pad' && B.Type == 'Pad'") (constraint clearance (min ${mm(PARAMS.pad_to_pad_min)})))`);
+  for (const [name, c] of Object.entries(NET_CLASSES)) {
+    const clr = Math.max(c.clearance, fabMinClear ?? 0);
+    L.push(`(rule "clearance_${name}" (condition "A.NetClass == '${name}'") (constraint clearance (min ${mm(clr)})))`);
+    L.push(`(rule "width_${name}" (condition "A.NetClass == '${name}'") (constraint track_width (min ${mm(c.track)})))`);
+  }
+  L.push(`(rule "via_size" (constraint via_diameter (min ${mm(VIA.min_size)})))`);
+  L.push(`(rule "via_hole" (constraint hole_size (min ${mm(VIA.min_drill)})))`);
+  L.push(`(rule "annular" (constraint annular_width (min ${mm(PARAMS.annular_min ?? VIA.annular_min)})))`);
+  L.push(`(rule "hole_to_hole" (constraint hole_to_hole (min ${mm(PARAMS.hole_to_hole_min)})))`);
+  L.push(`(rule "copper_to_edge" (constraint edge_clearance (min ${mm(PARAMS.copper_to_edge_min)})))`);
+  return L.join("\n") + "\n";
+}
+
+/** The .kicad_pro "net_settings" block: one net class per spec class and a pattern for each net. */
+export function netSettings(classes /* Map net -> class */) {
+  const base = (name, c, priority) => ({
+    name, clearance: c.clearance, track_width: c.track, via_diameter: VIA.size, via_drill: VIA.drill,
+    bus_width: 12, diff_pair_gap: 0.25, diff_pair_via_gap: 0.25, diff_pair_width: 0.2, line_style: 0,
+    microvia_diameter: 0.3, microvia_drill: 0.1, pcb_color: "rgba(0, 0, 0, 0.000)", schematic_color: "rgba(0, 0, 0, 0.000)", wire_width: 6,
+    ...(priority !== undefined ? { priority } : {}),
+  });
+  const list = [base("Default", NET_CLASSES.AUDIO_SIG)];
+  Object.entries(NET_CLASSES).forEach(([n, c], i) => list.push(base(n, c, i)));
+  return {
+    classes: list, meta: { version: 3 }, net_colors: null, netclass_assignments: null,
+    netclass_patterns: [...classes].map(([net, cls]) => ({ netclass: cls, pattern: `/${net}` })),
+  };
+}
+
+const row = (cells) => `| ${cells.join(" | ")} |`;
+const table = (head, rows) => [row(head), row(head.map(() => "---")), ...rows.map(row)].join("\n");
+
+/**
+ * report.md, in the spec's D-7 shape (tables and lists with rule IDs).
+ * @param {{summary: object, layout: object, routing: object|null, drc: object|null, classes: Map<string,string>, mounting: string, warnings: string[], extra?: object}} a
+ */
+export function reportMd({ summary, layout, routing, drc, classes, mounting, warnings, extra = {} }) {
+  const out = [`# ${summary.name}: PCB report`, ""];
+  const lens = new Map();
+  for (const t of routing?.tracks ?? []) {
+    let l = 0;
+    for (let k = 0; k + 1 < t.pts.length; k++) l += Math.hypot(t.pts[k + 1][0] - t.pts[k][0], t.pts[k + 1][1] - t.pts[k][1]);
+    lens.set(t.net, (lens.get(t.net) ?? 0) + l);
+  }
+
+  out.push("## inputs_received", "",
+    `- Parts: ${summary.parts.length} (${mounting === "tht" ? "through-hole" : "surface-mount"} default; BOM picks override per part)`,
+    `- Board: ${layout.w} x ${layout.l} mm, 2 layers, 1.6 mm, ${PARAMS.copper_oz ?? 1} oz (LS-01)`,
+    `- Coordinates: KiCad file units, origin top-left of the board outline, y down. Plan coordinates in drill_plan.json use y up from the lower-left (CS-01).`,
+    ...(extra.inputs ?? []), "");
+
+  out.push("## questions_asked", "", ...(extra.questions?.length ? extra.questions.map((q, i) => `${i + 1}. ${q}`) : ["- none open"]), "");
+
+  out.push("## assumptions", "",
+    "- Net classes, clearances and via sizes are the spec defaults; the tighter of spec and fab limit applies (no fab limit was given, so the spec values stand).",
+    `- Via ${VIA.size}/${VIA.drill} mm (spec prefers ${VIA.spec_pref.join("/")} mm; the larger pad gives the router room, still inside the spec's minimum ${VIA.min_size}/${VIA.min_drill}).`,
+    ...(extra.assumptions ?? []), "");
+
+  const dev = [
+    "RT-10 teardrops are not generated. Add them in KiCad (Edit > Teardrops) before ordering.",
+    "LS-03 SMT ground pads are not forced to a solid connection; the pour uses the zone default (thermal relief). Set per pad in KiCad if wanted.",
+    "CP-06 through-hole parts sit on a 1.27 mm grid (grid_place_fine) so their pads fall on the 0.635 mm routing lattice, not on 2.54 mm rows.",
+    "RT-12 traces come from a built-in auto-router. They have been checked by this app's own checker only. Review in KiCad and run its DRC before ordering.",
+    "K6 kicad-cli ERC/DRC was not run: no KiCad install was available. Run both yourself.",
+    ...(extra.deviations ?? []),
+  ];
+  out.push("## deviations", "", ...dev.map((d) => `- ${d}`), "");
+
+  const errs = drc?.errors ?? [];
+  const lenRows = [...lens].filter(([n]) => ["HIGH_Z", "AUDIO_SIG"].includes(classes.get(n))).sort((a, b) => b[1] - a[1]).map(([n, l]) => [`/${n}`, classes.get(n), `${l.toFixed(1)} mm`]);
+  const checks = [
+    ["E1", "no unconnected pins except NC", routing ? (drc?.unrouted.length ? `FAIL: ${drc.unrouted.length} net(s) incomplete` : "PASS") : "not run (no routing)"],
+    ["E2", "PCB netlist == schematic netlist", "PASS by construction (same data; covered by tests)"],
+    ["D1", "DRC 0 errors (this app's checker, not KiCad's)", routing ? (errs.length ? `FAIL: ${errs.length}` : "PASS") : "not run (no routing)"],
+    ["D2", "courtyard overlaps = 0", "PASS by construction (placement keeps courtyards apart; covered by tests)"],
+    ["D3", "all parts inside outline", "PASS by construction"],
+    ["A1", "no power/digital trace parallel to audio", "NOT IMPLEMENTED"],
+    ["A2", "record lengths of input, feedback, high-Z nets", lenRows.length ? "recorded below" : "no routed audio nets"],
+    ["E3, E4, E5, E6, A3, A4", "polarity, rail shorts, bypass, pin map, switcher, ground return", "NOT IMPLEMENTED"],
+    ...(extra.checks ?? []),
+  ];
+  out.push("## checks_table", "", table(["ID", "Check", "Result"], checks), "");
+  if (errs.length) out.push("### DRC errors", "", ...errs.slice(0, 40).map((e) => `- ${e.msg}`), "");
+  if (drc?.unrouted.length) out.push("### Not routed", "", ...drc.unrouted.map((u) => `- ${u.net}: ${u.pads.join(", ")}`), "");
+  if (lenRows.length) out.push("### Trace lengths (A2)", "", table(["Net", "Class", "Length"], lenRows), "");
+
+  out.push("## unresolved[V]", "",
+    "- KiCad file syntax for zones, net classes and custom rules is from memory of KiCad 8/9 and not verified in a real KiCad.",
+    "- Footprint pad data comes from the KiCad libraries mirrored on GitHub (2020); refresh with scripts/gen-footprints.mjs.",
+    ...(extra.unresolved ?? []).map((u) => `- ${u}`), "");
+
+  out.push("## drill_changes", "", ...(extra.drillChanges?.length ? extra.drillChanges.map((d) => `- ${d}`) : ["- none"]), "");
+
+  out.push("## risk_flags", "",
+    ...(warnings.length ? warnings.map((w) => `- ${w}`) : ["- none"]),
+    ...[...classes].filter(([, c]) => c === "HIGH_Z").map(([n]) => `- B6 high-impedance node /${n}: keep it short and away from power when you adjust the layout.`),
+    ...(extra.risks ?? []).map((r) => `- ${r}`), "");
+  return out.join("\n");
+}

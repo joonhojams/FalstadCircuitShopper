@@ -9,6 +9,11 @@
 import { ICS, icsFor, icFromChoice, defaultIc, packagePins } from "./ics.js";
 import { resolve, icFootprint } from "./footprints.js";
 import { missingFootprints, placeParts, writePcb, previewBoard } from "./pcb.js";
+import { route } from "./router.js";
+import { checkBoard } from "./drc.js";
+import { classifyNets } from "./netclass.js";
+import { druText, netSettings, reportMd } from "./rules.js";
+import { dsnText } from "./dsn.js";
 
 const q = (s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 const n = (x) => Number(x.toFixed(3));
@@ -126,7 +131,7 @@ export function buildProject(netlist, opts = {}) {
     let symbol, pins;
     if (["diode", "zener", "led"].includes(p.kind)) {
       symbol = defineSymbol({ id: "D2", ref: "D", left: [{ num: "2", name: "A" }], right: [{ num: "1", name: "K" }] });
-      pins = [{ num: "2", net: by.A }, { num: "1", net: by.K }];
+      pins = [{ num: "2", net: by.A, fn: "A" }, { num: "1", net: by.K, fn: "K" }];
     } else if (p.kind === "bjt" || p.kind === "mosfet") {
       const names = p.kind === "bjt" ? ["B", "C", "E"] : ["G", "D", "S"];
       const map = r.pads;
@@ -136,16 +141,16 @@ export function buildProject(netlist, opts = {}) {
         left: [{ num: map[names[0]], name: names[0] }],
         right: [{ num: map[names[1]], name: names[1] }, { num: map[names[2]], name: names[2] }],
       });
-      pins = names.map((nm) => ({ num: map[nm], net: by[nm] }));
+      pins = names.map((nm) => ({ num: map[nm], net: by[nm], fn: nm }));
     } else if (p.kind === "pot") {
       symbol = defineSymbol({ id: "pot", ref: "RV", left: [{ num: "1", name: "A" }], right: [{ num: "2", name: "W" }, { num: "3", name: "B" }] });
-      pins = [{ num: "1", net: by.A }, { num: "2", net: by.W }, { num: "3", net: by.B }];
+      pins = [{ num: "1", net: by.A, fn: "A" }, { num: "2", net: by.W, fn: "W" }, { num: "3", net: by.B, fn: "B" }];
     } else {
       symbol = defineSymbol(spec.two(`${p.kind}2`, { resistor: "R", capacitor: "C", inductor: "L", switch: "SW" }[p.kind] ?? "X", "1", "2"));
       pins = [{ num: "1", net: by["1"] }, { num: "2", net: by["2"] }];
     }
     if (r.warning) warnings.push(`${p.ref}: ${r.warning}`);
-    items.push({ ref: p.ref, symbol, value: choice?.mpn || p.value || p.details || "", footprint: r.footprint, source: r.fromBom ? "BOM" : "default", mpn: choice?.mpn ?? "", pins });
+    items.push({ ref: p.ref, symbol, value: choice?.mpn || p.value || p.details || "", footprint: r.footprint, source: r.fromBom ? "BOM" : "default", mpn: choice?.mpn ?? "", kind: p.kind, pins });
     used[p.kind] = (used[p.kind] ?? 0) + 1;
   }
 
@@ -160,7 +165,7 @@ export function buildProject(netlist, opts = {}) {
     const ic = ICS[id];
     for (let i = 0; i < list.length; i += ic.units.length) {
       const chunk = list.slice(i, i + ic.units.length);
-      const nets = new Map();
+      const nets = new Map(), fns = new Map();
       let pos = vpos, neg = vneg;
       if (ic.kind === "gate") { pos = logicRail(chunk[0]); neg = "GND"; }
       ic.units.forEach((unit, k) => {
@@ -172,7 +177,7 @@ export function buildProject(netlist, opts = {}) {
             by.RST ??= by.VCC;           // no reset pin: it was never pulled low
             pos = by.VCC; neg = by.GND;
           }
-          for (const [nm, num] of Object.entries(unit)) nets.set(num, by[nm] ?? null);
+          for (const [nm, num] of Object.entries(unit)) { nets.set(num, by[nm] ?? null); fns.set(num, nm); }
         } else if (ic.kind === "opamp") {
           // An unused channel: make it a unity-gain follower parked on the negative rail so it can't oscillate.
           const park = `UNUSED_${id}_${packages.length + 1}${String.fromCharCode(65 + k)}`;
@@ -186,12 +191,12 @@ export function buildProject(netlist, opts = {}) {
       if (ic.kind !== "timer") { nets.set(ic.power.pos, pos); nets.set(ic.power.neg, neg); }
       const pp = packagePins(ic);
       defineSymbol({ id, ref: "U", wide: true, left: pp.left, right: pp.right });
-      const pinList = [...pp.left, ...pp.right].map((p) => ({ num: p.num, net: nets.get(p.num) ?? null }));
+      const pinList = [...pp.left, ...pp.right].map((p) => ({ num: p.num, net: nets.get(p.num) ?? null, fn: fns.get(p.num) }));
       const choice = choices[chunk[0].ref];
       const fp = icFootprint(ic, choice, mounting);
       const ref = `U${chunk[0].ref.replace(/^\D+/, "")}`;
       const mpn = choice && icFromChoice(chunk[0], choice) === id ? choice.mpn : "";
-      items.push({ ref, symbol: id, value: mpn || id, footprint: fp.footprint, source: fp.fromBom ? "BOM" : "default", mpn, pins: pinList });
+      items.push({ ref, symbol: id, value: mpn || id, footprint: fp.footprint, source: fp.fromBom ? "BOM" : "default", mpn, kind: ic.kind, pins: pinList });
       packages.push({ ic: id, ref, channels: chunk.map((c) => c.ref), unused: ic.units.length - chunk.length });
       if (ic.units.length - chunk.length) {
         warnings.push(`${id} ${ref}: ${ic.units.length - chunk.length} spare channel(s) are ${ic.kind === "gate" ? "tied low with open outputs" : "wired as parked followers"}.`);
@@ -199,7 +204,7 @@ export function buildProject(netlist, opts = {}) {
       if (opts.decouple !== false && pos && neg) {
         const cref = newRef("C_DEC");
         items.push({ ref: cref, symbol: defineSymbol(spec.two("capacitor2", "C", "1", "2")), value: "100nF", footprint: resolve("capacitor", undefined, fp.mounting).footprint,
-          source: "default", mpn: "", pins: [{ num: "1", net: pos }, { num: "2", net: neg }] });
+          source: "default", mpn: "", kind: "capacitor", pins: [{ num: "1", net: pos }, { num: "2", net: neg }] });
       }
     }
   }
@@ -210,7 +215,7 @@ export function buildProject(netlist, opts = {}) {
     const jId = `J_PWR${supplyNets.length}`;
     defineSymbol({ id: jId, ref: "J", left: [], right: supplyNets.map((nm, i) => ({ num: String(i + 1), name: nm, type: "power_out" })) });
     items.push({
-      ref: "J1", symbol: jId, value: `Power: ${supplyNets.join(" ")}`,
+      ref: "J1", kind: "connector", symbol: jId, value: `Power: ${supplyNets.join(" ")}`,
       footprint: `Connector_PinHeader_2.54mm:PinHeader_1x${String(supplyNets.length).padStart(2, "0")}_P2.54mm_Vertical`,
       pins: supplyNets.map((nm, i) => ({ num: String(i + 1), net: nm })),
     });
@@ -291,17 +296,38 @@ ${noConnects.map((c) => `  (no_connect (at ${c.x} ${c.y}) (uuid ${q(uuid())}))`)
 
   // Placed (not routed) board. Needs real footprint geometry for every part; otherwise the user
   // starts the board from the schematic in KiCad as before and the preview uses a rough layout.
-  let pcb = null, layout = null;
+  let pcb = null, layout = null, routing = null, drc = null, classes = new Map();
   const missing = missingFootprints(items);
   if (missing.length) {
     warnings.push(`No .kicad_pcb was written because footprint geometry is not built in for: ${missing.map((m) => m.split(":").pop()).join(", ")}. Use Update PCB from Schematic (F8) in KiCad.`);
   } else {
-    layout = placeParts(items);
+    layout = placeParts(items, { gap: opts.gap });
     warnings.push(...layout.warnings);
-    const w = writePcb({ name, layout, uuid, sheetFile: `${name}.kicad_sch` });
+    const hasGnd = items.some((i) => i.pins.some((p) => p.net === "GND"));
+    const pour = hasGnd ? "GND" : null;
+    classes = classifyNets(layout.parts.map((r) => r.it), netlist.rails);
+    if (opts.route !== false) {
+      try {
+        routing = route(layout, { classes, pour, maxMs: opts.maxMs });
+        drc = checkBoard(layout, routing, { classes, pour });
+        if (drc.unrouted.length) warnings.push(`${drc.unrouted.length} net(s) could not be routed (${drc.unrouted.map((u) => u.net).join(", ")}). They stay as connections to finish in KiCad.`);
+        if (drc.errors.length) warnings.push(`The built-in checker found ${drc.errors.length} problem(s) in the routing; see report.md.`);
+      } catch (e) {
+        routing = null; drc = null;
+        warnings.push(`Routing failed (${e.message}); the board has placement and connections only.`);
+      }
+    }
+    const w = writePcb({ name, layout, uuid, sheetFile: `${name}.kicad_sch`, routing, pour });
     files[`${name}.kicad_pcb`] = w.text;
-    pcb = previewBoard(layout);
+    pcb = previewBoard(layout, routing, drc?.unrouted ?? []);
     summary.board = { width: layout.w, height: layout.l, nets: w.nets };
+    if (routing) {
+      summary.routing = { ...routing.stats, errors: drc?.errors.length ?? 0, unrouted: drc?.unrouted ?? [], pour };
+      files[`${name}.kicad_dru`] = druText(opts.fabMinClear);
+      files[`${name}.kicad_pro`] = JSON.stringify({ meta: { filename: `${name}.kicad_pro`, version: 3 }, schematic: { drawing: { default_line_thickness: 6 } }, net_settings: netSettings(classes) }, null, 2) + "\n";
+    }
+    files[`${name}.dsn`] = dsnText({ name, layout, classes, pour });
+    files["report.md"] = reportMd({ summary, layout, routing, drc, classes, mounting, warnings, extra: opts.reportExtra });
   }
-  return { ok: true, files, summary, warnings, labels, pcb, layout };
+  return { ok: true, files, summary, warnings, labels, pcb, layout, routing, drc, classes };
 }
