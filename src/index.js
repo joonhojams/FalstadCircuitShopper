@@ -2,6 +2,7 @@ import { bom } from "./parser.js";
 import { extractNetlist } from "./netlist.js";
 import { buildProject } from "./kicad.js";
 import { layoutBoard } from "./board.js";
+import { inspectPedal, ENCLOSURES, TYPES, DEFAULTS as PEDAL_DEFAULTS } from "./pedal.js";
 import { icFromChoice, defaultIc } from "./ics.js";
 import { icCatalog } from "./ics.js";
 import { zip } from "./zip.js";
@@ -424,6 +425,34 @@ function cleanChoices(input) {
   return out;
 }
 
+/** The guitar-pedal form from the browser, cut down to the fields pedal mode reads. Anything else is dropped. */
+function cleanPedal(p) {
+  if (p === true) return {};
+  if (!p || typeof p !== "object") return undefined;
+  const str = (v, n = 60) => (typeof v === "string" && v.trim() ? v.trim().slice(0, n) : undefined);
+  const pos = (v) => (v !== "" && v !== null && v !== undefined && Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : undefined);
+  const out = { type: str(p.type), enclosure: str(p.enclosure), mounting: str(p.mounting), bypass: str(p.bypass), taper: str(p.taper, 2),
+    inNet: str(p.inNet, 80), outNet: str(p.outNet, 80), knobDia: pos(p.knobDia), maxCurrentMa: pos(p.maxCurrentMa), supplyV: pos(p.supplyV) };
+  if (p.interior && typeof p.interior === "object") out.interior = { L: pos(p.interior.L), W: pos(p.interior.W), H: pos(p.interior.H) };
+  if (p.parts && typeof p.parts === "object") {
+    out.parts = {};
+    for (const k of ["reverse", "bulk", "led", "ledResistor", "vrefTop", "vrefBottom", "vrefCap"]) { const v = str(p.parts[k], 40); if (v) out.parts[k] = v; }
+    if (typeof p.parts.testPoints === "boolean") out.parts.testPoints = p.parts.testPoints;
+  }
+  if (p.custom && typeof p.custom === "object") {
+    out.custom = {};
+    for (const role of ["pot", "jack", "dc", "led", "sw"]) {
+      const c = p.custom[role];
+      if (!c || typeof c.mod !== "string" || !c.mod.trim()) continue;
+      const pinout = {};
+      for (const [k, v] of Object.entries(c.pinout && typeof c.pinout === "object" ? c.pinout : {})) { const t = str(String(v), 20); if (t) pinout[k.slice(0, 10)] = t; }
+      const hole = Array.isArray(c.hole) && c.hole.length === 2 && c.hole.every((x) => x !== "" && x !== null && Number.isFinite(Number(x))) ? c.hole.map(Number) : undefined;
+      out.custom[role] = { mod: c.mod.slice(0, 200001), pinout, facing: str(c.facing, 3), hole };
+    }
+  }
+  return out;
+}
+
 async function handleKicad(req) {
   let body;
   try { body = await req.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
@@ -442,6 +471,7 @@ async function handleKicad(req) {
     ignoreUnsupported: body.ignoreUnsupported === true,
     choices: cleanChoices(body.choices),
     route: body.route !== false,
+    pedal: cleanPedal(body.pedal),
     fabMinClear: typeof body.fabMinClear === "number" && body.fabMinClear > 0 && body.fabMinClear < 2 ? body.fabMinClear : null,
   };
   const built = buildProject(netlist, opts);
@@ -460,12 +490,16 @@ async function handleKicad(req) {
       unsupported: netlist.unsupported,
       warnings: built.ok ? built.warnings : netlist.warnings,
       errors: built.ok ? [] : built.errors,
+      questions: built.ok ? [] : built.questions ?? [],
+      // What the pedal form offers: the circuit's nets and rails, the known enclosures and the typical [V] values it starts from.
+      pedalInfo: { ...inspectPedal(netlist), enclosures: ENCLOSURES, types: TYPES, defaults: PEDAL_DEFAULTS },
+      pedal: built.ok ? built.summary.pedal ?? null : built.pedal ?? null,
       summary: built.ok ? built.summary : null,
       board: built.ok ? (built.pcb ?? layoutBoard(built.summary.parts)) : null,
       routing: built.ok ? built.summary.routing ?? null : null,
     });
   }
-  if (!built.ok) return json({ error: built.errors.join(" ") , errors: built.errors }, 422);
+  if (!built.ok) return json({ error: built.errors.join(" ") , errors: built.errors, questions: built.questions ?? [] }, 422);
   const bytes = zip({ ...built.files, "README.txt": kicadReadme(built) });
   return new Response(bytes, { headers: {
     "Content-Type": "application/zip",

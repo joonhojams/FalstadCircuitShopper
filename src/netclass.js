@@ -5,6 +5,7 @@ export const PARAMS = {
   board_thickness: 1.6,
   grid_place_tht: 2.54, grid_place_fine: 1.27, grid_route: 0.635,
   copper_to_edge_min: 0.3, copper_to_edge_pref: 0.5,
+  comp_to_edge_smt: 1.5, comp_to_edge_tht: 2.0,       // spec CP-10: SMT part and THT body to the board edge
   pour_clear: 0.3, thermal_spoke: 0.4, thermal_gap: 0.3,
   stitch_via_pitch: 12.5,
   audio_via_max_per_net: 2,
@@ -28,7 +29,7 @@ export const NET_CLASSES = {
   LED_CTRL:  { track: 0.30, clearance: 0.25 },
 };
 
-const isPower = (n, rails) => rails.has(n) || /^[+-]\d/.test(n) || /PROT/i.test(n);
+const isPower = (n, rails) => rails.has(n) || /^[+-]\d/.test(n) || /PROT/i.test(n) || /^DC_/i.test(n);
 
 /**
  * Assigns every net to a class.

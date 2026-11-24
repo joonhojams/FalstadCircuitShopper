@@ -14,7 +14,11 @@ import { checkBoard } from "./drc.js";
 import { classifyNets } from "./netclass.js";
 import { druText, netSettings, reportMd } from "./rules.js";
 import { dsnText } from "./dsn.js";
+import { preparePedal, addPedalParts, placePedal } from "./pedal.js";
+import { pedalOutputs, pedalSilk } from "./pedal-docs.js";
 
+// Courtyard gaps (mm) tried in turn until every net routes; undefined = the placer's default.
+const GAP_STEPS = [undefined, 1.0, 1.8, 2.8];
 const q = (s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 const n = (x) => Number(x.toFixed(3));
 const FONT = "(effects (font (size 1.27 1.27)))";
@@ -82,6 +86,16 @@ const spec = {
  * @returns {{ok: true, files: Record<string,string>, summary: object, warnings: string[]} | {ok: false, errors: string[]}}
  */
 export function buildProject(netlist, opts = {}) {
+  if (!opts.pedal) return buildInner(netlist, opts, null);
+  // Pedal mode (spec pedal_pcb_spec_for_model.md): validate the request first; missing physical inputs come back as numbered questions.
+  const pedal = preparePedal(netlist, opts.pedal === true ? {} : opts.pedal, { mounting: opts.mounting === "tht" ? "tht" : "smd" });
+  try {
+    if (pedal.errors.length) return { ok: false, errors: pedal.errors, questions: pedal.questions, pedal: { assumptions: pedal.assumptions } };
+    return buildInner(pedal.netlist, opts, pedal);
+  } finally { pedal.cleanup(); }
+}
+
+function buildInner(netlist, opts, pedal) {
   const mounting = opts.mounting === "tht" ? "tht" : "smd";
   const name = (opts.name || "circuit").replace(/[^\w.-]+/g, "_").slice(0, 60) || "circuit";
   const uuid = opts.uuid ?? (() => crypto.randomUUID());
@@ -156,9 +170,9 @@ export function buildProject(netlist, opts = {}) {
 
   // Op-amps, gates and 555s are packed into the chosen ICs, channel by channel, in reference order.
   const packages = [];
-  let uNum = 0;
+  const counters = new Map();
   const refTaken = new Set(items.map((i) => i.ref).concat(netlist.parts.map((p) => p.ref)));
-  const newRef = (prefix) => { let r; do { r = `${prefix}${++uNum}`; } while (refTaken.has(r)); refTaken.add(r); return r; };
+  const newRef = (prefix) => { let r, k = counters.get(prefix) ?? 0; do { r = `${prefix}${++k}`; } while (refTaken.has(r)); counters.set(prefix, k); refTaken.add(r); return r; };
   const byIc = {};
   for (const p of icParts) (byIc[icOf[p.ref]] ??= []).push(p);
   for (const [id, list] of Object.entries(byIc)) {
@@ -204,14 +218,15 @@ export function buildProject(netlist, opts = {}) {
       if (opts.decouple !== false && pos && neg) {
         const cref = newRef("C_DEC");
         items.push({ ref: cref, symbol: defineSymbol(spec.two("capacitor2", "C", "1", "2")), value: "100nF", footprint: resolve("capacitor", undefined, fp.mounting).footprint,
-          source: "default", mpn: "", kind: "capacitor", pins: [{ num: "1", net: pos }, { num: "2", net: neg }] });
+          source: "default", mpn: "", kind: "capacitor", pins: [{ num: "1", net: pos }, { num: "2", net: neg }], anchor: { ref, num: ic.power.pos } });
       }
     }
   }
 
   // One power connector carries every rail and ground, so the board has a single 5 V input.
   const supplyNets = [...netlist.rails.map((r) => r.net), "GND"].filter((v, i, a) => a.indexOf(v) === i);
-  if (supplyNets.length > 1 || netlist.rails.length) {
+  if (pedal) addPedalParts(pedal, { items, defineSymbol, newRef, resolve, mounting, warnings });
+  if (!pedal && (supplyNets.length > 1 || netlist.rails.length)) {
     const jId = `J_PWR${supplyNets.length}`;
     defineSymbol({ id: jId, ref: "J", left: [], right: supplyNets.map((nm, i) => ({ num: String(i + 1), name: nm, type: "power_out" })) });
     items.push({
@@ -219,6 +234,16 @@ export function buildProject(netlist, opts = {}) {
       footprint: `Connector_PinHeader_2.54mm:PinHeader_1x${String(supplyNets.length).padStart(2, "0")}_P2.54mm_Vertical`,
       pins: supplyNets.map((nm, i) => ({ num: String(i + 1), net: nm })),
     });
+  }
+
+  // Pedal mode places the board now: the standoff holes it may add need schematic symbols too.
+  let pedalPlan = null;
+  if (pedal) {
+    const lacking = missingFootprints(items);
+    if (lacking.length) return { ok: false, errors: [`Pedal mode needs the board file, and there is no built-in geometry for: ${lacking.map((m) => m.split(":").pop()).join(", ")}. Pick another part for it in the BOM or turn pedal mode off (IN-02).`] };
+    pedalPlan = placePedal(pedal, items, placeParts, { gap: opts.gap });
+    if (pedalPlan.errors.length) return { ok: false, errors: pedalPlan.errors, questions: pedal.questions };
+    for (const h of pedalPlan.extraItems ?? []) { h.symbol = defineSymbol({ id: "hole", ref: "H", left: [], right: [] }); items.push(h); }
   }
 
   // --- emit ---
@@ -287,7 +312,7 @@ ${noConnects.map((c) => `  (no_connect (at ${c.x} ${c.y}) (uuid ${q(uuid())}))`)
 
   const summary = {
     name, mounting,
-    parts: items.map((i) => ({ ref: i.ref, value: i.value, footprint: i.footprint, source: i.source, mpn: i.mpn })),
+    parts: items.map((i) => ({ ref: i.ref, value: i.value, footprint: i.footprint, source: i.source, mpn: i.mpn, ...(i.added ? { added: i.added } : {}) })),
     packages, supplyNets,
     rails: netlist.rails,
     nets: netlist.nets.length,
@@ -297,25 +322,45 @@ ${noConnects.map((c) => `  (no_connect (at ${c.x} ${c.y}) (uuid ${q(uuid())}))`)
   // Placed (not routed) board. Needs real footprint geometry for every part; otherwise the user
   // starts the board from the schematic in KiCad as before and the preview uses a rough layout.
   let pcb = null, layout = null, routing = null, drc = null, classes = new Map();
-  const missing = missingFootprints(items);
+  const missing = pedal ? [] : missingFootprints(items);
   if (missing.length) {
     warnings.push(`No .kicad_pcb was written because footprint geometry is not built in for: ${missing.map((m) => m.split(":").pop()).join(", ")}. Use Update PCB from Schematic (F8) in KiCad.`);
   } else {
-    layout = placeParts(items, { gap: opts.gap });
-    warnings.push(...layout.warnings);
+    layout = pedalPlan ? pedalPlan.layout : placeParts(items, { gap: opts.gap });
     const hasGnd = items.some((i) => i.pins.some((p) => p.net === "GND"));
     const pour = hasGnd ? "GND" : null;
     classes = classifyNets(layout.parts.map((r) => r.it), netlist.rails);
     if (opts.route !== false) {
-      try {
-        routing = route(layout, { classes, pour, maxMs: opts.maxMs });
-        drc = checkBoard(layout, routing, { classes, pour });
+      // Placement packs parts tightly; when that leaves nets unrouted, place again with more room between courtyards and keep the best board.
+      const gaps = opts.gap != null ? [opts.gap] : GAP_STEPS;
+      const budget = opts.maxMs ?? 20000, started = Date.now();
+      let best = null;
+      for (let k = 0; k < gaps.length; k++) {
+        const lay = k === 0 ? layout : (pedalPlan ? placePedal(pedal, items, placeParts, { gap: gaps[k] }).layout : placeParts(items, { gap: gaps[k] }));
+        if (!lay) break;
+        let rt = null, dc = null, err = null;
+        try {
+          rt = route(lay, { classes, pour, maxMs: opts.maxMs, noiseAware: opts.noiseAware });
+          dc = checkBoard(lay, rt, { classes, pour });
+        } catch (e) { err = e; }
+        const score = err ? Infinity : dc.unrouted.length * 1000 + dc.errors.length;
+        if (!best || score < best.score) best = { layout: lay, routing: rt, drc: dc, err, score, gap: gaps[k] };
+        if (score === 0 || Date.now() - started > budget / 2) break;
+      }
+      layout = best.layout; routing = best.routing; drc = best.drc;
+      if (best.err) {
+        warnings.push(`Routing failed (${best.err.message}); the board has placement and connections only.`);
+      } else {
+        if (best.gap !== undefined && best.gap !== gaps[0]) warnings.push(`Parts were placed ${best.gap} mm apart (instead of the default) so the router had room for the traces.`);
         if (drc.unrouted.length) warnings.push(`${drc.unrouted.length} net(s) could not be routed (${drc.unrouted.map((u) => u.net).join(", ")}). They stay as connections to finish in KiCad.`);
         if (drc.errors.length) warnings.push(`The built-in checker found ${drc.errors.length} problem(s) in the routing; see report.md.`);
-      } catch (e) {
-        routing = null; drc = null;
-        warnings.push(`Routing failed (${e.message}); the board has placement and connections only.`);
       }
+    }
+    warnings.push(...layout.warnings);
+    if (pedal) {
+      const sk = pedalSilk(pedal, pedalPlan, layout, { name, rev: opts.rev ?? "A", date: opts.date ?? null });
+      layout.texts = sk.texts;
+      if (sk.dropped.length) warnings.push(`No free place on the board for the silkscreen label(s): ${sk.dropped.join(", ")}.`);
     }
     const w = writePcb({ name, layout, uuid, sheetFile: `${name}.kicad_sch`, routing, pour });
     files[`${name}.kicad_pcb`] = w.text;
@@ -327,7 +372,14 @@ ${noConnects.map((c) => `  (no_connect (at ${c.x} ${c.y}) (uuid ${q(uuid())}))`)
       files[`${name}.kicad_pro`] = JSON.stringify({ meta: { filename: `${name}.kicad_pro`, version: 3 }, schematic: { drawing: { default_line_thickness: 6 } }, net_settings: netSettings(classes) }, null, 2) + "\n";
     }
     files[`${name}.dsn`] = dsnText({ name, layout, classes, pour });
-    files["report.md"] = reportMd({ summary, layout, routing, drc, classes, mounting, warnings, extra: opts.reportExtra });
+    let extra = opts.reportExtra;
+    if (pedal) {
+      const po = pedalOutputs({ st: pedal, plan: pedalPlan, items, layout, routing, drc, classes, pour, name, warnings });
+      Object.assign(files, po.files);
+      extra = po.extra;
+      summary.pedal = po.summary;
+    }
+    files["report.md"] = reportMd({ summary, layout, routing, drc, classes, mounting, warnings, extra });
   }
   return { ok: true, files, summary, warnings, labels, pcb, layout, routing, drc, classes };
 }

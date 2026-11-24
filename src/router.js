@@ -15,6 +15,11 @@
 import { PARAMS, VIA, NET_CLASSES, classOf } from "./netclass.js";
 import { distPtRect, distPtSeg } from "./geom.js";
 
+// Audio copper is kept away from power and LED copper (spec A1: no power trace within noise_parallel_sep of audio over
+// noise_parallel_len). It is a soft cost, so a net that has no other way still gets routed; the check reports what is left.
+const NOISY = new Set(["POWER", "LED_CTRL"]);
+const NOISE_COST = 3;               // extra cost per mm travelled inside the noisy zone, as a multiple of the step length
+
 const G = PARAMS.grid_route;
 const EPS = 0.02;
 const DIRS = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]];
@@ -153,6 +158,10 @@ export function route(layout, opts) {
     const x = i * G, y = j * G, r = via.size / 2;
     let ok = !noVia.some((b) => x > b[0] - 0.2 && x < b[2] + 0.2 && y > b[1] - 0.2 && y < b[3] + 0.2);
     for (const l of [0, 1]) ok = ok && clearPt(l, x, y, r, ctx.clr, ctx.id, true);
+    if (ok) store.near(0, x, y, via.drill + PARAMS.hole_to_hole_min + 1, (o) => {
+      // same-net copper may touch, but two drilled holes still need hole_to_hole_min between them
+      if (o.via && Math.hypot(o.x - x, o.y - y) - o.drill / 2 - via.drill / 2 < PARAMS.hole_to_hole_min + EPS) ok = false;
+    });
     viaC[n] = ok ? 1 : 2;
     return ok;
   };
@@ -193,6 +202,7 @@ export function route(layout, opts) {
   }
 
   const copperOut = { tracks: [], vias: [] };
+  const noisySegs = [];                                     // routed power / LED tracks: { layer, x0, y0, x1, y1 }
   const viaCount = new Map();
   const addTrack = (net, layer, pts) => {
     const w = cls(net).track, id = idOf(net);
@@ -201,10 +211,24 @@ export function route(layout, opts) {
       store.add(layer, { k: 2, x0: pts[k][0], y0: pts[k][1], x1: pts[k + 1][0], y1: pts[k + 1][1], hw: w / 2, net: id, clr, fromRoute: true });
     }
     copperOut.tracks.push({ net, layer: layer === 0 ? "F.Cu" : "B.Cu", w, pts: pts.map(([x, y]) => [R4(x), R4(y)]) });
+    if (NOISY.has(classes.get(net))) for (let k = 0; k + 1 < pts.length; k++) noisySegs.push({ layer, x0: pts[k][0], y0: pts[k][1], x1: pts[k + 1][0], y1: pts[k + 1][1] });
   };
+
+  /** Lattice nodes (both layers) within the A1 separation of routed power / LED copper on the same layer. */
+  function noiseMap() {
+    if (!noisySegs.length || opts.noiseAware === false) return null;
+    const sep = PARAMS.noise_parallel_sep, m = new Uint8Array(N);
+    for (const sg of noisySegs) {
+      const i0 = Math.max(0, Math.floor((Math.min(sg.x0, sg.x1) - sep) / G)), i1 = Math.min(nx - 1, Math.ceil((Math.max(sg.x0, sg.x1) + sep) / G));
+      const j0 = Math.max(0, Math.floor((Math.min(sg.y0, sg.y1) - sep) / G)), j1 = Math.min(ny - 1, Math.ceil((Math.max(sg.y0, sg.y1) + sep) / G));
+      for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) if (distPtSeg(i * G, j * G, sg.x0, sg.y0, sg.x1, sg.y1) < sep) m[nodeIdx(sg.layer, i, j)] = 1;
+    }
+    return m;
+  }
   const addVia = (net, x, y) => {
-    const o = { k: 1, x, y, r: via.size / 2, net: idOf(net), clr: cls(net).clearance, fromRoute: true };
+    const o = { k: 1, x, y, r: via.size / 2, net: idOf(net), clr: cls(net).clearance, fromRoute: true, via: true, drill: via.drill };
     store.add(0, o); store.add(1, o);
+    viaC.fill(0);                                           // cached via sites near this one are no longer free
     copperOut.vias.push({ net, x: R4(x), y: R4(y), size: via.size, drill: via.drill });
     viaCount.set(net, (viaCount.get(net) ?? 0) + 1);
   };
@@ -271,7 +295,8 @@ export function route(layout, opts) {
         if (!turnOK(d, k)) continue;
         const ni = i + DIRS[k][0], nj = j + DIRS[k][1];
         if (ni < 0 || nj < 0 || ni >= nx || nj >= ny || !nodeFree(l, ni, nj)) continue;
-        const ng = g + Math.hypot(DIRS[k][0], DIRS[k][1]) * G * bFactor(l) + (d !== 8 && d !== k ? 0.15 : 0);
+        const step = Math.hypot(DIRS[k][0], DIRS[k][1]) * G;
+        const ng = g + step * bFactor(l) + (d !== 8 && d !== k ? 0.15 : 0) + (ctx.noise && ctx.noise[nodeIdx(l, ni, nj)] ? step * NOISE_COST : 0);
         const ns = nodeIdx(l, ni, nj) * 9 + k;
         if (stamp[ns] === gen && gs[ns] <= ng) continue;
         if (!edgeFree(l, i, j, ni, nj)) continue;
@@ -335,6 +360,7 @@ export function route(layout, opts) {
   function routeNet(net, pads) {
     const c = cls(net);
     ctx = { hw: c.track / 2, clr: c.clearance, id: idOf(net), isGnd: classes.get(net) === "GND", audio: classes.get(net) === "AUDIO_SIG" || classes.get(net) === "HIGH_Z" };
+    if (ctx.audio) ctx.noise = noiseMap();
     viaC.fill(0);
     const tree = new Set();                             // lattice nodes of this net's copper
     const connected = [];
@@ -380,7 +406,7 @@ export function route(layout, opts) {
   // ---- order and attempts ----
   const nets = [...byNet.entries()].filter(([n, ps]) => ps.length > 1 && !(opts.skipNets?.has(n)));
   const hpwl = (ps) => { const xs = ps.map((p) => p.x), ys = ps.map((p) => p.y); return Math.max(...xs) - Math.min(...xs) + Math.max(...ys) - Math.min(...ys); };
-  const rank = (n) => (classes.get(n) === "POWER" ? 0 : classes.get(n) === "GND" ? 2 : 1);
+  const rank = (n) => (NOISY.has(classes.get(n)) ? 0 : classes.get(n) === "GND" ? 2 : 1);
   let order = nets.map(([n]) => n).sort((a, b) => rank(a) - rank(b) || hpwl(byNet.get(a)) - hpwl(byNet.get(b)) || a.localeCompare(b));
   let best = null;
   const attempts = opts.attempts ?? 4;
@@ -388,7 +414,7 @@ export function route(layout, opts) {
   for (let a = 0; a < attempts; a++) {
     attemptsRun++;
     // fresh copper: pads and keepouts only
-    copperOut.tracks.length = 0; copperOut.vias.length = 0; viaCount.clear();
+    copperOut.tracks.length = 0; copperOut.vias.length = 0; viaCount.clear(); noisySegs.length = 0;
     dropRouted();
     const unrouted = [];
     for (const net of order) {
@@ -413,7 +439,7 @@ export function route(layout, opts) {
     // rebuild the store with the best attempt's copper so the vias are checked against what is really there
     dropRouted();
     for (const t of best.tracks) { const l = t.layer === "F.Cu" ? 0 : 1; for (let k = 0; k + 1 < t.pts.length; k++) store.add(l, { k: 2, x0: t.pts[k][0], y0: t.pts[k][1], x1: t.pts[k + 1][0], y1: t.pts[k + 1][1], hw: t.w / 2, net: idOf(t.net), clr: cls(t.net).clearance }); }
-    for (const v of best.vias) { const o = { k: 1, x: v.x, y: v.y, r: v.size / 2, net: idOf(v.net), clr: cls(v.net).clearance }; store.add(0, o); store.add(1, o); }
+    for (const v of best.vias) { const o = { k: 1, x: v.x, y: v.y, r: v.size / 2, net: idOf(v.net), clr: cls(v.net).clearance, via: true, drill: v.drill }; store.add(0, o); store.add(1, o); }
     const inset = 1.5, px = [], pitch = PARAMS.stitch_via_pitch;
     const pts = [[inset, inset], [W - inset, inset], [W - inset, L - inset], [inset, L - inset]];
     for (let k = 0; k < 4; k++) {

@@ -93,13 +93,21 @@ export function reportMd({ summary, layout, routing, drc, classes, mounting, war
     ["D3", "all parts inside outline", "PASS by construction"],
     ["A1", "no power/digital trace parallel to audio", "NOT IMPLEMENTED"],
     ["A2", "record lengths of input, feedback, high-Z nets", lenRows.length ? "recorded below" : "no routed audio nets"],
-    ["E3, E4, E5, E6, A3, A4", "polarity, rail shorts, bypass, pin map, switcher, ground return", "NOT IMPLEMENTED"],
+    ["E3", "polarized parts oriented alike", "NOT IMPLEMENTED"],
+    ["E4", "supply not shorted to GND; VREF within 2 %", "NOT IMPLEMENTED"],
+    ["E5", "bypass path has no effect loading", "NOT IMPLEMENTED"],
+    ["E6", "every pin_map row satisfied", "NOT IMPLEMENTED"],
+    ["A3", "switcher / charge pump separation", "NOT IMPLEMENTED"],
+    ["A4", "ground-return table", "NOT IMPLEMENTED"],
     ...(extra.checks ?? []),
   ];
+  // A check the caller computed (pedal mode) replaces the placeholder row with the same id; a placeholder never sits beside a real result.
+  { const done = new Set((extra.checks ?? []).map((c) => c[0])); const keep = checks.slice(0, checks.length - (extra.checks ?? []).length).filter((c) => !done.has(c[0])); checks.splice(0, checks.length, ...keep, ...(extra.checks ?? [])); }
   out.push("## checks_table", "", table(["ID", "Check", "Result"], checks), "");
   if (errs.length) out.push("### DRC errors", "", ...errs.slice(0, 40).map((e) => `- ${e.msg}`), "");
   if (drc?.unrouted.length) out.push("### Not routed", "", ...drc.unrouted.map((u) => `- ${u.net}: ${u.pads.join(", ")}`), "");
   if (lenRows.length) out.push("### Trace lengths (A2)", "", table(["Net", "Class", "Length"], lenRows), "");
+  if (extra.sections?.length) out.push(...extra.sections);
 
   out.push("## unresolved[V]", "",
     "- KiCad file syntax for zones, net classes and custom rules is from memory of KiCad 8/9 and not verified in a real KiCad.",

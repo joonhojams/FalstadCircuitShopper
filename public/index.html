@@ -120,6 +120,12 @@
   .pcb3d .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; font-size: 13px; }
   .pcb3d .bar button { padding: 3px 10px; font-size: 13px; }
   .pcb3d .info { color: var(--muted); min-height: 1.4em; flex: 1; min-width: 160px; }
+  .pf { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px 12px; margin: 8px 0; }
+  .pf label { display: grid; gap: 2px; font-size: 13px; color: var(--muted); align-content: start; }
+  .pf input, .pf select { padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; min-width: 0; width: 100%; }
+  .pf input[type=checkbox] { width: auto; justify-self: start; }
+  .pf-hw { border-top: 1px solid var(--line); padding-top: 6px; margin-top: 6px; }
+  .pf-hw strong { font-size: 13px; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -243,6 +249,8 @@
         <label title="Built-in two-layer router with the spec's net classes. Always review the result in KiCad."><input type="checkbox" id="kc-route" checked> Route traces</label>
         <button id="kc-go">Check circuit</button>
       </div>
+      <div class="row"><label title="Fits the board to a pedal enclosure and adds the jacks, footswitch, LED and power input a pedal needs, with a drill plan. Typical values are marked [V]: confirm them."><input type="checkbox" id="kc-pedal"> Guitar pedal mode</label></div>
+      <div id="kc-pedal-box" hidden></div>
       <div id="kc-status" class="hint" style="margin-top:8px"></div>
       <div id="kc-out"></div>
       <div class="row" id="kc-dl-row" hidden><button class="primary" id="kc-dl">Download KiCad project (.zip)</button></div>
@@ -760,13 +768,120 @@ function kcChoices() {
   });
   return out;
 }
+// ---------- guitar pedal mode (form) ----------
+// The server sends the circuit's nets, the known enclosures and the typical [V] values (spec <params>); the form starts from them.
+// Everything shown is sent, so what you see is what the board is built from.
+let pedalInfo = null, pedalNets = "";
+const pedalForm = { parts: {}, custom: {} };
+const PF_HW = {
+  pot:  { label: "Potentiometer", pins: [["A", "pad of one end"], ["W", "pad of the wiper"], ["B", "pad of the other end"]] },
+  jack: { label: "1/4 in jack", pins: [["tip", "tip pad"], ["sleeve", "sleeve pad"]], facing: true },
+  dc:   { label: "DC jack", pins: [["tip", "centre pad"], ["sleeve", "sleeve pad"]], facing: true },
+  led:  { label: "LED", pins: [["A", "anode pad"], ["K", "cathode pad"]] },
+};
+const pfChanged = () => { if ($("#kc-out").childElementCount) kcCheck(); };
+function pfField(label, get, set, kind = "text", o = {}) {
+  const input = kind === "select"
+    ? el("select", {}, ...o.options.map(([v, t]) => el("option", { value: v }, t)))
+    : el("input", { type: kind, ...(o.ph ? { placeholder: o.ph } : {}), ...(o.attrs ?? {}) });
+  if (kind === "checkbox") input.checked = Boolean(get()); else input.value = get() ?? "";
+  input.addEventListener("change", () => { set(kind === "checkbox" ? input.checked : input.value); pfChanged(); });
+  return el("label", o.title ? { title: o.title } : {}, label, input);
+}
+function pedalDefaults(d) {
+  const f = pedalForm;
+  for (const k of ["type", "enclosure", "mounting", "bypass", "taper"]) f[k] ??= d[k];
+  for (const [k, v] of Object.entries(d.parts)) f.parts[k] ??= v;
+}
+function renderPedalForm() {
+  const box = $("#kc-pedal-box");
+  box.replaceChildren();
+  if (!pedalInfo) { box.append(el("p", { class: "hint" }, "Press Check circuit to load the pedal form.")); return; }
+  const f = pedalForm, I = pedalInfo, num = { min: 0, step: "any" };
+  const S = (k) => (v) => { f[k] = v; }, G = (k) => () => f[k];
+  const SP = (k) => (v) => { f.parts[k] = v; }, GP = (k) => () => f.parts[k];
+  const nets = (auto) => [["", `Auto: ${auto ?? "not found"}`], ...I.nets.map((n) => [n, n])];
+  box.append(
+    el("p", { class: "hint" }, "Typical values are marked [V]: they are not datasheet values. Confirm or change them. Anything you leave blank is assumed and listed in report.md."),
+    el("div", { class: "pf" },
+      pfField("Circuit type", G("type"), S("type"), "select", { options: I.types.map((t) => [t, t.replace(/_/g, " ")]) }),
+      pfField("Enclosure", G("enclosure"), S("enclosure"), "select", { options: [...Object.entries(I.enclosures).map(([m, d]) => [m, `${m} (${d.join(" × ")} mm outside) [V]`]), ["custom", "Other: enter the interior size"]] }),
+      pfField("Interior length mm", G("L"), S("L"), "number", { ph: "from the maker's drawing", attrs: num }),
+      pfField("Interior width mm", G("W"), S("W"), "number", { ph: "from the maker's drawing", attrs: num }),
+      pfField("Usable height mm", G("H"), S("H"), "number", { ph: "from the maker's drawing", attrs: num }),
+      pfField("Mounting", G("mounting"), S("mounting"), "select", { options: [["sandwich", "Sandwich (pot bushings and jack nuts)"], ["standoffs", "M3 standoffs"]] }),
+      pfField("Bypass", G("bypass"), S("bypass"), "select", { options: [["true_bypass_3PDT", "True bypass, 3PDT"], ["none", "None"]] }),
+      pfField("Knob diameter mm", G("knobDia"), S("knobDia"), "number", { ph: "blank = 22 mm pot pitch [V]", attrs: num }),
+      pfField("Pot taper letter", G("taper"), S("taper"), "text", { attrs: { maxlength: 2 } }),
+      pfField("Supply voltage V", G("supplyV"), S("supplyV"), "number", { ph: "blank = highest rail", attrs: num }),
+      pfField("Supply current mA", G("maxCurrentMa"), S("maxCurrentMa"), "number", { ph: "blank = 100 mA [V]", attrs: num }),
+      pfField("Audio input net", G("inNet"), S("inNet"), "select", { options: nets(I.in) }),
+      pfField("Audio output net", G("outNet"), S("outNet"), "select", { options: nets(I.out) })),
+    el("h3", { style: "font-size:14px;margin:10px 0 2px" }, "Parts the circuit file leaves out [V]"),
+    el("div", { class: "pf" },
+      pfField("Reverse-polarity diode", GP("reverse"), SP("reverse")),
+      pfField("Bulk capacitor", GP("bulk"), SP("bulk")),
+      pfField("Status LED", GP("led"), SP("led")),
+      pfField("LED resistor", GP("ledResistor"), SP("ledResistor")),
+      ...(I.rails.length > 1 ? [pfField("Vcc/2 divider top", GP("vrefTop"), SP("vrefTop")), pfField("Vcc/2 divider bottom", GP("vrefBottom"), SP("vrefBottom")), pfField("Vcc/2 capacitor", GP("vrefCap"), SP("vrefCap"))] : []),
+      pfField("Test points", GP("testPoints"), SP("testPoints"), "checkbox")),
+    el("h3", { style: "font-size:14px;margin:10px 0 2px" }, "Your own hardware footprints (optional)"),
+    el("p", { class: "hint" }, "Upload a .kicad_mod and say which pad is which. It replaces the built-in [V] footprint for that part. Pots, LED and footswitch face the lid; jacks need the panel hole position and facing."));
+  for (const [role, h] of Object.entries(PF_HW)) {
+    const cur = () => (f.custom[role] ??= { pinout: {} });
+    const file = el("input", { type: "file", accept: ".kicad_mod" });
+    file.addEventListener("change", async () => {
+      const t = file.files[0];
+      if (!t) { delete f.custom[role]; return pfChanged(); }
+      if (t.size > 200000) { file.value = ""; $("#kc-status").textContent = "That footprint file is larger than 200 kB."; return; }
+      cur().mod = await t.text(); pfChanged();
+    });
+    box.append(el("div", { class: "pf-hw" }, el("strong", {}, h.label),
+      el("div", { class: "pf" },
+        el("label", {}, ".kicad_mod file", file),
+        ...h.pins.map(([k, t]) => pfField(t, () => f.custom[role]?.pinout[k], (v) => { cur().pinout[k] = v; }, "text", { ph: "pad name" })),
+        ...(h.facing ? [
+          pfField("Opening faces", () => f.custom[role]?.facing ?? "-x", (v) => { cur().facing = v; }, "select", { options: [["-x", "left (-x)"], ["+x", "right (+x)"], ["-y", "up (-y)"], ["+y", "down (+y)"]] }),
+          pfField("Panel hole x mm", () => f.custom[role]?.hx, (v) => { cur().hx = v; }, "number", { ph: "from footprint origin" }),
+          pfField("Panel hole y mm", () => f.custom[role]?.hy, (v) => { cur().hy = v; }, "number", { ph: "from footprint origin" })] : []))));
+  }
+}
+function pedalPayload() {
+  if (!$("#kc-pedal").checked) return undefined;
+  const f = pedalForm, n = (v) => (v === "" || v == null ? undefined : Number(v));
+  const out = { type: f.type, enclosure: f.enclosure, mounting: f.mounting, bypass: f.bypass, taper: f.taper, knobDia: n(f.knobDia), maxCurrentMa: n(f.maxCurrentMa),
+    supplyV: n(f.supplyV), inNet: f.inNet || undefined, outNet: f.outNet || undefined, parts: { ...f.parts }, custom: {} };
+  if (f.L || f.W || f.H) out.interior = { L: n(f.L), W: n(f.W), H: n(f.H) };
+  for (const [role, c] of Object.entries(f.custom)) {
+    if (!c.mod) continue;
+    out.custom[role] = { mod: c.mod, pinout: c.pinout, facing: c.facing, hole: c.hx !== undefined && c.hx !== "" && c.hy !== undefined && c.hy !== "" ? [Number(c.hx), Number(c.hy)] : undefined };
+  }
+  return out;
+}
+function syncPedalForm(info) {
+  if (!info) return;
+  const sig = JSON.stringify([info.nets, info.rails.map((r) => r.net), info.in, info.out]);
+  pedalInfo = info; pedalDefaults(info.defaults);
+  if (sig !== pedalNets) {                                   // a different circuit: rebuild the form, and drop net choices it no longer has
+    pedalNets = sig;
+    if (pedalForm.inNet && !info.nets.includes(pedalForm.inNet)) pedalForm.inNet = "";
+    if (pedalForm.outNet && !info.nets.includes(pedalForm.outNet)) pedalForm.outNet = "";
+    renderPedalForm();
+  }
+}
+$("#kc-pedal").addEventListener("change", () => {
+  $("#kc-pedal-box").hidden = !$("#kc-pedal").checked;
+  if ($("#kc-pedal").checked && !pedalInfo) { renderPedalForm(); kcCheck(); } else pfChanged();
+});
+
 const kcBody = (download) => ({
-  text: $("#input").value, mounting: $("#kc-mount").value, decouple: $("#kc-decouple").checked, route: $("#kc-route").checked,
+  text: $("#input").value, mounting: $("#kc-mount").value, decouple: $("#kc-decouple").checked, route: $("#kc-route").checked, pedal: pedalPayload(),
   ics: kcPicks, choices: kcChoices(), download, name: (document.querySelector("#result-title")?.textContent || "circuit").replace(/^Parts list\s*·?\s*/, "") || "circuit",
 });
 function resetKicad() {
   if (pcbCleanup) pcbCleanup();
   kcPicks = {};
+  pedalInfo = null; pedalNets = ""; $("#kc-pedal-box").replaceChildren();
   $("#kc-out").replaceChildren();
   $("#kc-status").textContent = "";
   $("#kc-dl-row").hidden = true;
@@ -775,6 +890,7 @@ const KC_KIND = { opamp: "op-amp", gate: "logic gate", timer: "555 timer" };
 function renderKicad(d) {
   const box = $("#kc-out");
   box.replaceChildren();
+  syncPedalForm(d.pedalInfo);
   const chosen = Object.keys(kcChoices()).length;
   box.append(el("p", { class: "hint" }, chosen
     ? `Footprints follow the ${chosen} part(s) chosen in the price table above (package and mounting type). Parts without a choice use the mounting style selected here.`
@@ -794,7 +910,9 @@ function renderKicad(d) {
   if (d.rails.length) box.append(el("p", { class: "hint" }, "Supply nets: " + d.rails.map((r) => `${r.net} (${r.volts} V)`).join(", ") + ", GND. All rails of the same voltage are one net, fed from one connector."));
   else box.append(el("p", { class: "hint" }, "No DC rail found in this circuit."));
   for (const u of d.unsupported) box.append(el("p", { class: "hint", style: "color:var(--danger)" }, `Can't be placed on a board yet: ${u.name} ×${u.count}`));
-  for (const e of d.errors) box.append(el("p", { class: "hint", style: "color:var(--danger)" }, e));
+  const qs = $("#kc-pedal").checked ? d.questions || [] : [];
+  if (qs.length) box.append(el("div", { class: "hint", style: "color:var(--danger)" }, el("strong", {}, "Pedal mode needs your answers before it can build the board:"), el("ol", {}, ...qs.map((q) => el("li", {}, q)))));
+  for (const e of d.errors.filter((e) => !qs.includes(e))) box.append(el("p", { class: "hint", style: "color:var(--danger)" }, e));
   if (d.board) {
     const host = el("div", {}); box.append(host); mountBoardViewer(host, d.board);
     const r = d.routing;
@@ -805,6 +923,16 @@ function renderKicad(d) {
         (r.unrouted.length ? ` Not routed: ${r.unrouted.map((u) => u.net).join(", ")}.` : "") +
         " This is an auto-router: review it in KiCad (fill zones with B, then run its DRC) before ordering."));
     }
+  }
+  if ($("#kc-pedal").checked && d.pedal) {
+    const p = d.pedal;
+    if (p.holes != null) {
+      const failed = Object.entries(p.checks).filter(([, v]) => v === "FAIL");
+      box.append(el("p", { class: "hint", style: failed.length ? "color:var(--danger)" : "" },
+        `Pedal: ${p.enclosure}, interior ${p.interior.join(" × ")} mm, ${p.mounting} mounting, ${p.holes} panel holes. Spec checks: ${Object.entries(p.checks).map(([k, v]) => `${k} ${v.toLowerCase()}`).join(", ")}. ` +
+        "The zip holds the drill plan, mechanical overlay, wiring guide and report.md; check the drill plan against your enclosure before drilling."));
+    }
+    if (p.assumptions?.length) box.append(el("details", {}, el("summary", {}, `${p.assumptions.length} assumption(s) to confirm`), el("ul", {}, ...p.assumptions.map((a) => el("li", {}, a)))));
   }
   if (d.warnings.length) box.append(el("details", {}, el("summary", {}, `${d.warnings.length} warning(s)`), el("ul", {}, ...d.warnings.map((w) => el("li", {}, w)))));
   if (d.summary) {

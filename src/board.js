@@ -52,6 +52,14 @@ export function bodyFor(footprint, ref = "") {
   if (/Potentiometer_Bourns_TC33X/.test(name)) return { w: 3.8, l: 3.6, h: 2.2, kind: "pot", smd: true };
   if (/Potentiometer_Bourns_3296/.test(name)) return { w: 9.5, l: 4.8, h: 10, kind: "pot" };
   if (/Potentiometer_Alps_RK09K/.test(name)) return { w: 12, l: 10, h: 15, kind: "pot" };
+  // Pedal hardware and power-entry capacitors. Heights are typical values (spec tag [V]), not datasheet numbers.
+  if (/^Connector_Audio/.test(fp)) return { w: 20.6, l: 18.2, h: 11, kind: "conn" };
+  if (/^Connector_BarrelJack/.test(fp)) return { w: 14.5, l: 9, h: 11, kind: "conn" };
+  if (/Potentiometer_Alpha_RD901F/.test(name)) return { w: 11.35, l: 9.5, h: 10, kind: "pot" };
+  if (/^MountingHole/.test(fp)) return { w: 3.2, l: 3.2, h: 0.1, kind: "other" };
+  if (/^Pedal:WirePads/.test(fp)) return { w: 18, l: 18, h: 0.5, kind: "conn" };       // the switch itself hangs from the lid; only wires reach the board
+  if (/^Pedal:TP_/.test(fp)) return { w: 2, l: 2, h: 0.5, kind: "other" };
+  if ((m = /^CP_Elec_([\d.]+)x([\d.]+)/.exec(name))) return { w: Number(m[1]) + 0.3, l: Number(m[1]) + 0.3, h: Number(m[2]), kind: "elec", smd: true };
   return { ...SMALL, kind: "other", smd: true };
 }
 

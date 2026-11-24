@@ -12,6 +12,7 @@
 import { FOOTPRINT_DATA } from "./footprint-data.js";
 import { bodyFor } from "./board.js";
 import { PARAMS } from "./netclass.js";
+import { distPtRect } from "./geom.js";
 
 const STEP = 0.5;          // placement grid, mm
 const THT_GRID = 1.27;     // spec grid_place_fine; THT pads then land on the 0.635 mm routing lattice
@@ -22,7 +23,7 @@ const R4 = (v) => Math.round(v * 10000) / 10000;
 const q = (s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 
 // KiCad angles are counter-clockwise on a y-down screen.
-const rotPt = (x, y, deg) => {
+export const rotPt = (x, y, deg) => {
   switch (((deg % 360) + 360) % 360) {
     case 90: return [y, -x];
     case 180: return [-x, -y];
@@ -53,7 +54,7 @@ function bodyBox(fp) {
 }
 
 /** Pad centres/sizes and courtyard for a footprint turned by `rot`, relative to its origin. */
-function oriented(fpName, rot) {
+export function oriented(fpName, rot) {
   const fp = FOOTPRINT_DATA[fpName];
   const pads = fp.pads.map((p) => {
     const [x, y] = rotPt(p.x, p.y, rot);
@@ -67,8 +68,13 @@ function oriented(fpName, rot) {
 }
 
 /**
- * @param {{ref: string, footprint: string, pins: {num: string, net: string|null}[]}[]} items
- * @returns {{parts: object[], w: number, l: number, warnings: string[]}}
+ * @param {{ref: string, footprint: string, pins: {num: string, net: string|null}[], anchor?: {ref: string, num: string}}[]} items
+ * @param {{gap?: number, fixed?: {it: object, x: number, y: number, rot: number, role?: string}[], bounds?: {w: number, l: number},
+ *          keepouts?: {x: number, y: number, r: number}[], uniformPolar?: boolean}} opts
+ *   fixed: parts already at their final place (locked); bounds: a board of this size, nothing is moved afterwards;
+ *   keepouts: circles no courtyard may touch; uniformPolar: electrolytics, diodes and LEDs are never rotated (spec CP-03);
+ *   items[].anchor: this part wants its supply pad on that pad (a decoupling capacitor and its IC).
+ * @returns {{parts: object[], w: number, l: number, warnings: string[], unplaced: object[]}}
  */
 export function placeParts(items, opts = {}) {
   const warnings = [];
@@ -80,7 +86,10 @@ export function placeParts(items, opts = {}) {
     for (const num of byNum.keys()) if (!fp.pads.some((p) => p.n === num)) warnings.push(`${it.ref}: pin ${num} has no matching pad on ${it.footprint.split(":").pop()}.`);
     info.set(it, byNum);
   }
-  const rotsFor = (it) => (FOOTPRINT_DATA[it.footprint].pads.length <= 3 && it.ref !== "J1" ? [0, 90] : [0]);
+  const polar = (it) => opts.uniformPolar && (["diode", "zener", "led"].includes(it.kind) || /CP_/.test(it.footprint));
+  const rotsFor = (it) => (!polar(it) && FOOTPRINT_DATA[it.footprint].pads.length <= 3 && it.ref !== "J1" ? [0, 90] : [0]);
+  const bounds = opts.bounds ?? null, keep = opts.keepouts ?? [];
+  const unplaced = [];
   const area = (it) => { const c = FOOTPRINT_DATA[it.footprint].cy; return (c[2] - c[0]) * (c[3] - c[1]); };
 
   const placed = [];                          // { it, rot, x, y, box, pads: [{n, x, y, w, h, net}] }
@@ -103,8 +112,16 @@ export function placeParts(items, opts = {}) {
     for (let ix = Math.floor((b[0] - pad) / CELL); ix <= Math.floor((b[2] + pad) / CELL); ix++)
       for (let iy = Math.floor((b[1] - pad) / CELL); iy <= Math.floor((b[3] + pad) / CELL); iy++) fn(cellKey(ix, iy));
   };
-  const free = (box) => {
+  const edgeMargin = (it) => (FOOTPRINT_DATA[it.footprint].attr === "through_hole" ? PARAMS.comp_to_edge_tht : PARAMS.comp_to_edge_smt);
+  const free = (box, body, it) => {
     if (box[0] < minX) return false;
+    if (bounds) {
+      const m = edgeMargin(it), bb = body ?? box;              // component body to board edge (spec CP-10)
+      if (bb[0] < m || bb[1] < m || bb[2] > bounds.w - m || bb[3] > bounds.l - m) return false;
+      if (box[0] < 0.3 || box[1] < 0.3 || box[2] > bounds.w - 0.3 || box[3] > bounds.l - 0.3) return false;
+      const rc = { x0: box[0], y0: box[1], x1: box[2], y1: box[3] };
+      for (const k of keep) if (distPtRect(k.x, k.y, rc) < k.r) return false;
+    }
     let ok = true;
     cellsOf(box, gap, (k) => {
       if (!ok) return;
@@ -132,8 +149,21 @@ export function placeParts(items, opts = {}) {
   const stepOf = (it) => (FOOTPRINT_DATA[it.footprint].attr === "through_hole" ? THT_GRID : STEP);
   const snap = (v, st) => Math.round(v / st) * st;
 
+  const anchorOf = (it) => {
+    if (!it.anchor) return null;
+    const a = placed.find((r) => r.it.ref === it.anchor.ref);
+    const pad = a?.pads.find((p) => p.n === String(it.anchor.num));
+    return pad ? { x: pad.x, y: pad.y, net: pad.net } : null;
+  };
+  const anchorCost = (it, o, x, y, a) => {
+    if (!a) return 0;
+    const p = o.pads.find((q) => info.get(it).get(q.n) === a.net);
+    return p ? 6 * (Math.abs(x + p.x - a.x) + Math.abs(y + p.y - a.y)) : 0;
+  };
+
   function put(it) {
     const fp0 = oriented(it.footprint, 0);
+    const anc = anchorOf(it);
     // Aim each pad at the closest placed pad on its net.
     let tx = 0, ty = 0, k = 0;
     for (const p of fp0.pads) {
@@ -143,7 +173,9 @@ export function placeParts(items, opts = {}) {
       for (const t of list) { const d = Math.abs(t.x - p.x) + Math.abs(t.y - p.y); if (d < bd) { bd = d; best = t; } }
       tx += best.x - p.x; ty += best.y - p.y; k++;
     }
-    if (k) { tx /= k; ty /= k; }
+    const ap = anc && fp0.pads.find((q) => info.get(it).get(q.n) === anc.net);
+    if (ap) { tx = anc.x - ap.x; ty = anc.y - ap.y; }
+    else if (k) { tx /= k; ty /= k; }
     else if (placed.length) {                 // no connection yet: next to the placed group
       tx = Math.max(...placed.map((r) => r.box[2])) - fp0.cy[0] + gap; ty = placed[0].y;
     }
@@ -159,26 +191,39 @@ export function placeParts(items, opts = {}) {
           for (let dy = -r; dy <= r && found < 8; dy += edge ? 1 : 2 * r || 1) {   // whole column on the ring's sides, two cells otherwise
             if (!edge && Math.abs(dy) !== r) continue;
             const x = R4(tx + dx * sp), y = R4(ty + dy * sp);
-            if (!free([x + o.cy[0], y + o.cy[1], x + o.cy[2], y + o.cy[3]])) continue;
+            if (!free([x + o.cy[0], y + o.cy[1], x + o.cy[2], y + o.cy[3]], [x + o.body[0], y + o.body[1], x + o.body[2], y + o.body[3]], it)) continue;
             found++;
-            const c = cost(it, o, x, y) + rot * 0.001;            // prefer upright on a tie
+            const c = cost(it, o, x, y) + anchorCost(it, o, x, y, anc) + rot * 0.001;            // prefer upright on a tie
             if (!bestRec || c < bestRec.c) bestRec = { c, rot, x, y };
           }
         }
       }
     }
+    if (!bestRec) { unplaced.push(it); warnings.push(`${it.ref}: no free place on the board for ${it.footprint.split(":").pop()}.`); return null; }
     return place(it, bestRec.rot, bestRec.x, bestRec.y);
   }
 
   const todo = [...items];
-  const j1 = todo.find((i) => i.ref === "J1");
+  for (const f of opts.fixed ?? []) {
+    todo.splice(todo.indexOf(f.it), 1);
+    Object.assign(place(f.it, f.rot, f.x, f.y), { locked: true, role: f.role });
+  }
+  const j1 = opts.fixed?.length ? null : todo.find((i) => i.ref === "J1");
   if (j1) { todo.splice(todo.indexOf(j1), 1); const r = place(j1, 0, 0, 0); minX = r.box[2] + 1.5; }
+  const ready = (it) => !it.anchor || placed.some((r) => r.it.ref === it.anchor.ref);
   while (todo.length) {
-    // Most-connected next; the largest part first when nothing is connected yet (usually an IC).
-    let bi = 0, bs = -1;
-    todo.forEach((it, i) => { const s = score(it); if (s > bs || (s === bs && (area(it) > area(todo[bi]) || (area(it) === area(todo[bi]) && it.ref.localeCompare(todo[bi].ref, undefined, { numeric: true }) < 0)))) { bi = i; bs = s; } });
+    // Most-connected next; the largest part first when nothing is connected yet (usually an IC). A part that
+    // wants to sit on another part's pad waits for it, then goes next.
+    let bi = -1, bs = -1;
+    todo.forEach((it, i) => {
+      if (!ready(it)) return;
+      const s = score(it) + (it.anchor ? 1000 : 0);
+      if (bi < 0 || s > bs || (s === bs && (area(it) > area(todo[bi]) || (area(it) === area(todo[bi]) && it.ref.localeCompare(todo[bi].ref, undefined, { numeric: true }) < 0)))) { bi = i; bs = s; }
+    });
+    if (bi < 0) bi = 0;                       // an anchor that never gets placed must not stall the rest
     put(todo.splice(bi, 1)[0]);
   }
+  if (bounds) return { parts: placed, w: bounds.w, l: bounds.l, warnings, unplaced };
 
   // Move everything so the board starts at (0, 0) with a margin around the courtyards.
   const bx0 = Math.min(...placed.map((r) => r.box[0])), by0 = Math.min(...placed.map((r) => r.box[1]));
@@ -191,7 +236,7 @@ export function placeParts(items, opts = {}) {
     r.body = r.body.map((v, i) => R4(v + (i % 2 ? dy : dx)));
     for (const p of r.pads) { p.x = R4(p.x + dx); p.y = R4(p.y + dy); }
   }
-  return { parts: placed, w: Math.max(w, 10), l: Math.max(l, 10), warnings };
+  return { parts: placed, w: Math.max(w, 10), l: Math.max(l, 10), warnings, unplaced };
 }
 
 /** Ratsnest: a minimum spanning tree over each net's pads, as [x1, y1, x2, y2]. */
@@ -279,7 +324,8 @@ export function writePcb({ name, layout, uuid, sheetFile, routing = null, pour =
 
   const fps = layout.parts.map((r) => {
     const it = r.it, fp = FOOTPRINT_DATA[it.footprint];
-    const props = (ref, value) => `    (property "Reference" ${q(ref)} (at 0 ${R4(fp.cy[1] - 1)} ${r.rot}) (layer "F.SilkS") (uuid ${q(uuid())})
+    const refAt = r.refAt ?? [0, R4(fp.cy[1] - 1)];
+    const props = (ref, value) => `    (property "Reference" ${q(ref)} (at ${refAt[0]} ${refAt[1]} ${r.rot}) (layer "F.SilkS") (uuid ${q(uuid())})
       ${FONT})
     (property "Value" ${q(value)} (at 0 ${R4(fp.cy[3] + 1)} ${r.rot}) (layer "F.Fab") (uuid ${q(uuid())})
       ${FONT})
@@ -305,7 +351,7 @@ export function writePcb({ name, layout, uuid, sheetFile, routing = null, pour =
     const model = fp.model
       ? `\n    (model ${q(`\${KICAD9_3DMODEL_DIR}/${fp.model.p}.step`)} (offset (xyz ${fp.model.o.join(" ")})) (scale (xyz ${fp.model.s.join(" ")})) (rotate (xyz ${fp.model.r.join(" ")})))`
       : "";
-    return `  (footprint ${q(it.footprint)} (layer "F.Cu") (uuid ${q(uuid())}) (at ${X(r.x)} ${Y(r.y)}${r.rot ? ` ${r.rot}` : ""})
+    return `  (footprint ${q(it.footprint)}${r.locked ? " (locked yes)" : ""} (layer "F.Cu") (uuid ${q(uuid())}) (at ${X(r.x)} ${Y(r.y)}${r.rot ? ` ${r.rot}` : ""})
 ${props(it.ref, it.value ?? "")}
     (path ${q(`/${it.symUuid}`)})
     (sheetname "/")
@@ -347,6 +393,9 @@ ${pads.join("\n")}
     ? layout.outline.map(edgeLine).join("\n")
     : `  (gr_rect (start ${X(0)} ${Y(0)}) (end ${X(layout.w)} ${Y(layout.l)}) (stroke (width 0.05) (type default)) (fill no) (layer "Edge.Cuts") (uuid ${q(uuid())}))`;
 
+  const texts = (layout.texts ?? []).map((t) => `  (gr_text ${q(t.text)} (at ${X(t.x)} ${Y(t.y)}${t.rot ? ` ${t.rot}` : ""}) (layer ${q(t.layer ?? "F.SilkS")}) (uuid ${q(uuid())})
+    (effects (font (size ${t.size ?? 1} ${t.size ?? 1}) (thickness ${t.thickness ?? 0.15}))${t.layer === "B.SilkS" ? " (justify mirror)" : ""}))`);
+
   const text = `(kicad_pcb
   (version 20241229)
   (generator "circuitjs-bom")
@@ -360,6 +409,7 @@ ${[...netId].map(([n, id]) => `  (net ${id} ${q(netName(n))})`).join("\n")}
 ${fps.join("\n")}
 ${copper.join("\n")}
 ${outline}
+${texts.join("\n")}
   (embedded_fonts no)
 )
 `;
