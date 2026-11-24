@@ -6,7 +6,7 @@
 // convention (CS-01): origin at the lower-left corner, +x right, +y up. In the plan the origin is the lower-left INSIDE corner of the
 // enclosure; the PCB sits one board-edge clearance (PEDAL.edge_clear) in from it on every side (the single PCB <-> enclosure offset, PL-01).
 
-import { PEDAL, PEDAL_FOOTPRINTS, modText } from "./pedal.js";
+import { PEDAL, PEDAL_FOOTPRINTS, HW_STACK as HS, modText } from "./pedal.js";
 import { FOOTPRINT_DATA } from "./footprint-data.js";
 import { bodyFor } from "./board.js";
 import { PARAMS, NET_CLASSES } from "./netclass.js";
@@ -190,7 +190,7 @@ export function pedalOutputs({ st, plan, items, layout, routing, drc, classes, p
   const ofRole = (role) => st.mech.filter((m) => m.role === role);
 
   // ---- holes (DP-*): positions come from the placed footprints ----
-  const holes = [];
+  const holes = [], roleOf = new Map();
   for (const m of st.mech) {
     if (!m.hole) continue;
     const id = `D${holes.length + 1}`, h = m.hole;
@@ -199,6 +199,7 @@ export function pedalOutputs({ st, plan, items, layout, routing, drc, classes, p
     else if (h.face === "end_top") { face = "end_top"; x = encX(h.along); y = R2(Hu / 2); }
     else { face = h.face; x = R2(Li - (h.along + c)); y = R2(Hu / 2); }
     holes.push({ id, ref: m.it.ref, what: m.hw.what ?? m.role, face, x, y, dia: m.dia });
+    roleOf.set(id, m.role);
   }
   (st.standoffs ?? []).forEach(([bx, by], i) => holes.push({ id: `D${holes.length + 1}`, ref: `H${i + 1}`, what: "M3 standoff screw", face: "base", x: encX(bx), y: encY(by), dia: PEDAL.standoff_drill }));
 
@@ -275,7 +276,34 @@ export function pedalOutputs({ st, plan, items, layout, routing, drc, classes, p
   checks.push(["M2", `height: part + ${PARAMS.board_thickness} board + 0.5 margin <= ${R2(Hu)} mm usable (BO-06)`, tall.length ? `FAIL: ${tall.join(", ")}. Options: relocate to a lower zone, or pick a lower part.` : `PASS (tallest ${tallest.ref} ${R2(tallest.h)} mm, typical [V])`]);
   unresolved.push("Part heights are typical values for each footprint family, not datasheet numbers (spec: missing Height_mm -> ASSUME [V]). Put your parts' real heights in the BOM.");
 
-  checks.push(["M4", "hardware stack-up (nuts, washers, lugs) collision-free", "NOT IMPLEMENTED: nut and washer sizes depend on your hardware; see the stack-up notes in wiring_guide.md"]);
+  // M4 / BO-03: nuts, washers and the pot shoulder. Hardware sizes are typical values [V] (HW_STACK in pedal.js), not your parts' numbers.
+  const stackOf = (id) => ({ pot: HS.pot, jack_in: HS.jack, jack_out: HS.jack, dc_jack: HS.dc, switch: HS.sw })[roleOf.get(id)];
+  const m4 = [];
+  for (const h of holes) {
+    const hw = stackOf(h.id);
+    if (!hw) continue;
+    const panel = h.face === "top" ? HS.lid_t : PEDAL.wall, need = R2(panel + hw.washer_t + hw.nut_t + HS.thread_margin);
+    if (need > hw.bushing_len + 1e-6) m4.push(`${h.id} ${h.ref}: panel ${panel} + washer ${hw.washer_t} + nut ${hw.nut_t} + ${HS.thread_margin} thread = ${need} mm but the bushing is ${hw.bushing_len} mm`);
+  }
+  holes.forEach((a, i) => holes.slice(i + 1).forEach((b) => {
+    const na = stackOf(a.id), nb = stackOf(b.id);
+    if (a.face !== b.face || !na || !nb) return;
+    const g = Math.hypot(a.x - b.x, a.y - b.y) - na.nut_d / 2 - nb.nut_d / 2;
+    if (g < HS.nut_gap - 1e-6) m4.push(`${a.id} ${a.ref} and ${b.id} ${b.ref}: nuts ${R2(g)} mm apart (need ${HS.nut_gap})`);
+  }));
+  checks.push(["M4", "hardware stack-up: bushing long enough for panel + washer + nut, neighbouring nuts clear (typical hardware [V])", m4.length ? `FAIL: ${m4.join("; ")}` : `PASS (typical [V] hardware; measure yours)`]);
+  for (const f of m4) deviations.push(`M4: ${f}.`);
+  if (input.mounting === "sandwich") {
+    // BO-03: the board hangs from the pot shoulders, so the gap from the board's top face to the lid is the shoulder height.
+    const gap = HS.pot.shoulder_h, mech = new Set([...st.mech.map((m) => m.role), "standoff"]), over = [];
+    for (const r of layout.parts) {
+      if (mech.has(r.role)) continue;
+      const h = bodyFor(r.it.footprint, r.it.ref).h;
+      if (h + HS.margin > gap + 1e-6) over.push(`${r.it.ref} ${R2(h)} mm`);
+    }
+    checks.push(["BO-03", `sandwich: parts under the lid fit the ${gap} mm pot-shoulder gap (+ ${HS.margin} margin) [V]`, over.length ? `FAIL: ${over.join(", ")} too tall` : `PASS (gap ${gap} mm = pot shoulder height, typical [V])`]);
+    if (over.length) deviations.push(`BO-03: ${over.join(", ")} stand taller than the ${gap} mm gap between the board and the lid (typical pot shoulder [V]). Options in order: lay the part down or move it where the lid gap is larger, use a lower part, or switch to standoff mounting. A taller pot shoulder also fixes it: measure yours.`);
+  }
 
   // E6 / E2: every pin lands on a pad of its footprint with the right net
   const e6 = [];
@@ -366,7 +394,8 @@ export function pedalOutputs({ st, plan, items, layout, routing, drc, classes, p
     "Side-wall holes are at half the usable height (DP-04). With sandwich mounting the jack axis must sit at the PCB's height; check with the lid on.",
     "Jack and DC jack hole positions in the footprint (where the barrel meets the wall) were read from the KiCad footprint's pads [V].",
   );
-  if (input.mounting === "sandwich") unresolved.push("BO-03 sandwich mounting needs the pot shoulder height and the gap to the lid; neither is known here. Measure them from your pots and the enclosure before ordering.");
+  if (input.mounting === "sandwich") unresolved.push(`BO-03 sandwich mounting: the gap to the lid is taken as the pot shoulder height (${HS.pot.shoulder_h} mm above the board, typical [V]). Measure it from your pots.`);
+  unresolved.push(`M4 hardware stack-up uses typical values [V]: lid ${HS.lid_t} mm, wall ${PEDAL.wall} mm, pot bushing ${HS.pot.bushing_len} mm with a ${HS.pot.nut_t} mm nut and ${HS.pot.washer_t} mm washer, jack bushing ${HS.jack.bushing_len} mm. Replace them with your hardware's numbers.`);
 
   // ---- placement.json (K5) ----
   const flipY = (y) => R4(layout.l - y);
@@ -499,9 +528,9 @@ function wiringGuide({ st, items, holes, layout }) {
     "Hole positions and diameters are in drill_plan.json / drill_plan.svg. Drill the diameters as listed, then check each against your part (the spec's numbers are typical [V]).", "");
   L.push("## Hardware stack-up [V]", "",
     input.mounting === "sandwich"
-      ? "Mounting: sandwich. The board hangs from the pot bushings and the jack nuts; there are no standoffs. The pot shoulder height and the gap to the lid are not known here (BO-03): measure them from your pots and enclosure before ordering, and set the board height so the side-wall jack holes line up."
+      ? `Mounting: sandwich. The board hangs from the pot bushings and the jack nuts; there are no standoffs. The gap between the board and the lid is taken as the pot shoulder height, ${HS.pot.shoulder_h} mm (typical [V], BO-03): measure it on your pots, and set the board height so the side-wall jack holes line up.`
       : "Mounting: M3 standoffs at the marked holes (drill 3.2 mm, keep copper clear of the 6 mm standoff head).",
-    "Nut and washer thicknesses are not modelled (check M4 is not implemented): test-fit with the lid on.", "");
+    `Check M4 uses typical hardware [V]: lid ${HS.lid_t} mm, wall ${PEDAL.wall} mm, pot nut ${HS.pot.nut_t} + washer ${HS.pot.washer_t} on a ${HS.pot.bushing_len} mm bushing, jack nut ${HS.jack.nut_t} + washer ${HS.jack.washer_t} on ${HS.jack.bushing_len} mm. Test-fit with the lid on.`, "");
   L.push("## Orientation notes", "",
     "- All polarized parts (electrolytic capacitors, diodes, LEDs) are placed at the same rotation (CP-03).",
     "- Pin 1 of every IC is marked on the silkscreen by the library footprint.",

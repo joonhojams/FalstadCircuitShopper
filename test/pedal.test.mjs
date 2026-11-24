@@ -195,3 +195,25 @@ test("A4: the report lists where every ground pad returns to and fails a pad wit
   assert.equal(g.rows[1].via, 1);
   assert.deepEqual(groundReturn(layout, null, "GND"), { rows: [], loose: [] });
 });
+
+test("M4 and BO-03 run with typical [V] hardware: a tall capacitor fails the sandwich gap, standoffs have no such gap, a short bushing fails M4", async () => {
+  const { HW_STACK } = await import("../src/pedal.js");
+  const sandwichTht = build({ mounting: "tht", pedal: { type: "analog_overdrive", enclosure: "1590B", mounting: "sandwich" } });
+  assert.match(checkRow(sandwichTht, "BO-03"), /\| FAIL: .*too tall/);
+  assert.match(checkRow(sandwichTht, "M4"), /\| PASS/);
+  assert.match(sandwichTht.files["report.md"], /BO-03: .*taller than the 7 mm gap/);
+  assert.ok(!/NOT IMPLEMENTED/.test(checkRow(sandwichTht, "M4")));
+
+  const standoffs = build({ mounting: "tht", pedal: { type: "analog_overdrive", enclosure: "1590B", mounting: "standoffs" } });
+  assert.equal(checkRow(standoffs, "BO-03"), undefined, "BO-03 is a sandwich-only rule");
+  assert.match(checkRow(standoffs, "M4"), /\| PASS/);
+
+  assert.match(checkRow(build({ mounting: "smd" }), "BO-03"), /\| PASS/, "low SMD parts fit under the lid");
+
+  const keep = HW_STACK.pot.bushing_len;
+  try {
+    HW_STACK.pot.bushing_len = 3;
+    const short = build({ mounting: "smd" });
+    assert.match(checkRow(short, "M4"), /\| FAIL: .*bushing is 3 mm/);
+  } finally { HW_STACK.pot.bushing_len = keep; }
+});

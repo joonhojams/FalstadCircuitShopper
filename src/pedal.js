@@ -93,6 +93,18 @@ export const HW = {
   sw:   { fp: "Pedal:WirePads_3PDT_3x3", hole: [0, 0], dia: PEDAL.hole.sw, face: "top", what: "3PDT footswitch" },
   led:  { fp: "LED_THT:LED_D3.0mm", pins: { A: "2", K: "1" }, hole: [1.27, 0], dia: PEDAL.hole.led, face: "top", what: "LED" },
 };
+// Hardware stack-up (spec M4, BO-03). EVERY number here is a typical value [V], not a datasheet value: measure your own pots, jacks,
+// nuts and lid. They only decide whether the report's M4 / BO-03 rows pass; nothing on the board is sized from them.
+export const HW_STACK = {
+  lid_t: 2.0,              // [V] lid thickness the pot and switch bushings pass through (the walls use PEDAL.wall)
+  thread_margin: 0.5,      // [V] thread that must stand proud of the nut
+  nut_gap: 0.5,            // [V] clearance between the nuts of neighbouring holes on one face
+  margin: 0.5,             // spec height_margin
+  pot:  { shoulder_h: 7.0, bushing_len: 7.0, nut_t: 2.0, washer_t: 0.5, nut_d: 11 },   // shoulder_h: board top face to the pot shoulder = gap to the lid (sandwich)
+  jack: { bushing_len: 8.0, nut_t: 2.0, washer_t: 0.5, nut_d: 14 },
+  dc:   { bushing_len: 9.0, nut_t: 2.0, washer_t: 0.5, nut_d: 16 },
+  sw:   { bushing_len: 14.0, nut_t: 3.0, washer_t: 1.0, nut_d: 17 },
+};
 const FACING = { "-x": [-1, 0], "+x": [1, 0], "-y": [0, -1], "+y": [0, 1] };
 // For a part whose hole is not given: the middle of its unnumbered mounting pads, else the centre of its pads.
 export function holeOf(fpName, given) {
