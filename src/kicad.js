@@ -8,6 +8,7 @@
 
 import { ICS, icsFor, icFromChoice, defaultIc, packagePins } from "./ics.js";
 import { resolve, icFootprint } from "./footprints.js";
+import { FOOTPRINT_DATA } from "./footprint-data.js";
 import { missingFootprints, placeParts, writePcb, previewBoard } from "./pcb.js";
 import { route } from "./router.js";
 import { checkBoard } from "./drc.js";
@@ -108,13 +109,19 @@ function buildInner(netlist, opts, pedal) {
   const choices = opts.choices ?? {};     // ref -> the part picked in the BOM
   const LABEL = { opamp: "op-amp", gate: "logic gate", timer: "555 timer" };
   const icParts = netlist.parts.filter((p) => LABEL[p.kind]);
-  const icOf = {};
+  const icOf = {}, defaultIcs = [];
   for (const p of icParts) {
-    const id = opts.ics?.[p.ref] || icFromChoice(p, choices[p.ref]) || defaultIc(p);
+    const given = opts.ics?.[p.ref] || icFromChoice(p, choices[p.ref]);
+    const id = given || defaultIc(p);
     if (!id) errors.push(`Choose an IC for ${p.ref} (${LABEL[p.kind]}).`);
     else if (!ICS[id]) errors.push(`${p.ref}: unknown IC "${id}".`);
     else if (!icsFor(p).some((i) => i.name === id)) errors.push(`${p.ref}: ${id} can't be used for this ${LABEL[p.kind]}.`);
-    else icOf[p.ref] = id;
+    else { icOf[p.ref] = id; if (!given) defaultIcs.push({ ref: p.ref, ic: id, what: LABEL[p.kind] }); }
+  }
+  // An IC the app picked itself (nothing chosen, none implied by the BOM) is reported, never silent.
+  for (const id of [...new Set(defaultIcs.map((d) => d.ic))]) {
+    const of = defaultIcs.filter((d) => d.ic === id);
+    warnings.push(`${id} was chosen by default for ${of.map((d) => `${d.ref} (${d.what})`).join(", ")}: no IC was picked and your BOM does not imply one. Pick another in the IC list if you want a different part.`);
   }
   const opamps = icParts.filter((p) => p.kind === "opamp");
   const gates = icParts.filter((p) => p.kind === "gate");
@@ -236,6 +243,14 @@ function buildInner(netlist, opts, pedal) {
     });
   }
 
+  // One mounting style per board: a part picked in the BOM overrides the style chosen above (user parts win), so say which parts did.
+  // Switches, pots and connectors are through-hole by nature and are not counted.
+  {
+    const want = mounting === "tht" ? "through_hole" : "smd";
+    const odd = items.filter((i) => !i.added && !["switch", "pot", "connector"].includes(i.kind) && FOOTPRINT_DATA[i.footprint] && FOOTPRINT_DATA[i.footprint].attr !== want);
+    if (odd.length) warnings.push(`Mixed mounting: ${odd.map((i) => i.ref).join(", ")} use ${mounting === "tht" ? "surface-mount" : "through-hole"} footprints on a ${mounting === "tht" ? "through-hole" : "surface-mount"} board, because the parts picked in the BOM override the style selected above. Pick matching parts, or change the style, to keep the board to one mounting style.`);
+  }
+
   // Pedal mode places the board now: the standoff holes it may add need schematic symbols too.
   let pedalPlan = null;
   if (pedal) {
@@ -313,13 +328,13 @@ ${noConnects.map((c) => `  (no_connect (at ${c.x} ${c.y}) (uuid ${q(uuid())}))`)
   const summary = {
     name, mounting,
     parts: items.map((i) => ({ ref: i.ref, value: i.value, footprint: i.footprint, source: i.source, mpn: i.mpn, ...(i.added ? { added: i.added } : {}) })),
-    packages, supplyNets,
+    packages, supplyNets, defaultIcs,
     rails: netlist.rails,
     nets: netlist.nets.length,
   };
   const files = { [`${name}.kicad_sch`]: sch, [`${name}.kicad_pro`]: pro };
 
-  // Placed (not routed) board. Needs real footprint geometry for every part; otherwise the user
+  // Placed board, routed unless routing is turned off. Needs real footprint geometry for every part; otherwise the user
   // starts the board from the schematic in KiCad as before and the preview uses a rough layout.
   let pcb = null, layout = null, routing = null, drc = null, classes = new Map();
   const missing = pedal ? [] : missingFootprints(items);

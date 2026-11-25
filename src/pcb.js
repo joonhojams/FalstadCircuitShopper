@@ -1,6 +1,6 @@
 // Places the board's footprints and writes a KiCad 9 .kicad_pcb with footprints (pads, silkscreen,
 // courtyard, 3D model reference), net assignments on every pad, a board outline and a ratsnest-ready
-// netlist. Traces are NOT routed: open the board in KiCad and route (or autoroute) it there.
+// netlist. Traces come from router.js when routing is on; without it, route the board in KiCad.
 //
 // Footprint geometry comes from src/footprint-data.js (see scripts/gen-footprints.mjs). If a
 // footprint is missing from that table, no PCB is written and the preview falls back to the rough

@@ -1,5 +1,5 @@
 // Pedal-mode outputs derived from the placed (and routed) board: drill plan, mechanical overlay, wiring guide, machine-readable
-// netlist and placement, the project footprint library, silkscreen labels, and the spec's checks (M1-M5, E3-E6, A1, CP-04, D3).
+// netlist and placement, the project footprint library, silkscreen labels, and the spec's checks (M1-M5, D3, E3-E6, CP-04, A1, A3, A4, BO-03).
 // Spec: pedal_pcb_spec_for_model.md (deliverables D-1, D-3, D-4, D-5, D-6, D-7 and <checks>).
 //
 // Coordinates: the PCB file is y down from the board's top-left. The drill plan, placement.json and the overlay use the spec's

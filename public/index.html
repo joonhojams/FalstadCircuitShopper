@@ -242,7 +242,7 @@
 
     <div class="card" id="kicad" hidden>
       <h2>PCB (KiCad 9)</h2>
-      <p class="hint">Creates a KiCad project with a schematic and a board whose parts are already placed and wired as unrouted connections. You choose the ICs for the op-amps, every DC rail of the same voltage is joined into one net, and a single power connector brings in all the supplies. Open it in KiCad to adjust the placement, route the traces and order from there.</p>
+      <p class="hint">Creates a KiCad project with a schematic and a board with its parts placed and, with Route traces on, routed by a built-in auto-router. You choose the ICs for the op-amps, every DC rail of the same voltage is joined into one net, and a single power connector brings in all the supplies. Open it in KiCad to review the placement and traces, fill the zones, run its DRC and order from there.</p>
       <div class="row">
         <label>Parts <select id="kc-mount"><option value="smd">Surface-mount</option><option value="tht">Through-hole</option></select></label>
         <label><input type="checkbox" id="kc-decouple" checked> 100 nF decoupling cap per IC</label>

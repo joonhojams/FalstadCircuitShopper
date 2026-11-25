@@ -583,3 +583,29 @@ test("the zip carries the rules, the Specctra file and the report", () => {
   const bytes = new TextDecoder("latin1").decode(zip(demoBuild("smd").files));
   for (const f of ["demo.kicad_pcb", "demo.kicad_dru", "demo.dsn", "report.md"]) assert.ok(bytes.includes(f), f);
 });
+
+// ---- alignment fixes: default ICs are reported, mixed mounting is reported ----
+test("an IC the app picked by default is flagged in the warnings and the report; a chosen IC is not", () => {
+  const nl = () => extractNetlist(lines("150 200 100 264 100 0 2 0 5", "g 200 116 200 140 0", "R 200 84 200 60 0 0 40 5 0 0 0.5"));
+  const def = buildProject(nl(), {});
+  assert.ok(def.ok, def.errors?.join());
+  assert.deepEqual(def.summary.defaultIcs.map((d) => [d.ref, d.ic]), [["U1", "74HC08"]]);
+  assert.ok(def.warnings.some((w) => /74HC08 was chosen by default for U1/.test(w)));
+  assert.match(def.files["report.md"], /74HC08 was chosen by default for U1/);
+  const chosen = buildProject(nl(), { ics: { U1: "74HC08" } });
+  assert.deepEqual(chosen.summary.defaultIcs, []);
+  assert.ok(!chosen.warnings.some((w) => /chosen by default/.test(w)));
+});
+
+test("a BOM pick that breaks the board's mounting style is reported; matching picks and panel parts are not", () => {
+  const nl = () => extractNetlist(lines("R 0 -20 0 -40 0 0 40 5 0 0 0.5", "r 0 0 60 0 0 1000", "c 60 0 120 0 0 1e-7 0", "g 120 0 120 20 0"));
+  const tht = { R1: { package: "Axial", mounting: "Through Hole" } };
+  const mixed = buildProject(nl(), { mounting: "smd", choices: tht });
+  assert.ok(mixed.ok, mixed.errors?.join());
+  const w = mixed.warnings.find((x) => /^Mixed mounting/.test(x));
+  assert.ok(w, "mixed mounting warning");
+  assert.match(w, /R1 use through-hole footprints on a surface-mount board/);
+  assert.ok(!/C1/.test(w) && !/J1/.test(w), "the surface-mount capacitor and the power header are not blamed");
+  assert.ok(!buildProject(nl(), { mounting: "tht", choices: tht }).warnings.some((x) => /^Mixed mounting/.test(x)), "matching picks");
+  assert.ok(!buildProject(nl(), { mounting: "smd" }).warnings.some((x) => /^Mixed mounting/.test(x)), "no picks");
+});
